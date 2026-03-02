@@ -110,6 +110,76 @@ describe('Config', () => {
         expect(config.autoApproveFileEdits).toBe(true);
     });
 
+    it('defaults platforms to ["discord"] when PLATFORMS is not set', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        delete process.env.PLATFORMS;
+
+        const config = loadConfig();
+        expect(config.platforms).toEqual(['discord']);
+    });
+
+    it('parses PLATFORMS env var as comma-separated list', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        process.env.PLATFORMS = 'discord,telegram';
+
+        const config = loadConfig();
+        expect(config.platforms).toEqual(['discord', 'telegram']);
+    });
+
+    it('filters invalid platform names from PLATFORMS', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        process.env.PLATFORMS = 'discord,slack,telegram';
+
+        const config = loadConfig();
+        expect(config.platforms).toEqual(['discord', 'telegram']);
+    });
+
+    it('returns telegramToken from env var', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        process.env.TELEGRAM_BOT_TOKEN = 'tg_token_123';
+
+        const config = loadConfig();
+        expect(config.telegramToken).toBe('tg_token_123');
+    });
+
+    it('telegramToken is undefined when not set', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        delete process.env.TELEGRAM_BOT_TOKEN;
+
+        const config = loadConfig();
+        expect(config.telegramToken).toBeUndefined();
+    });
+
+    it('parses TELEGRAM_ALLOWED_USER_IDS env var', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        process.env.TELEGRAM_ALLOWED_USER_IDS = '111,222,333';
+
+        const config = loadConfig();
+        expect(config.telegramAllowedUserIds).toEqual(['111', '222', '333']);
+    });
+
+    it('telegramAllowedUserIds is undefined when not set', () => {
+        process.env.DISCORD_BOT_TOKEN = 'secret_token';
+        process.env.CLIENT_ID = 'client123';
+        process.env.ALLOWED_USER_IDS = 'user1';
+        delete process.env.TELEGRAM_ALLOWED_USER_IDS;
+
+        const config = loadConfig();
+        expect(config.telegramAllowedUserIds).toBeUndefined();
+    });
+
     it('normalizes response delivery mode to stream even when set to final-only', () => {
         process.env.LAZYGRAVITY_RESPONSE_DELIVERY = 'final-only';
         expect(resolveResponseDeliveryMode()).toBe('stream');

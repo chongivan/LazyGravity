@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as dotenv from 'dotenv';
 import type { AppConfig, ExtractionMode } from './config';
 import type { LogLevel } from './logger';
+import type { PlatformType } from '../platform/types';
 
 // Load .env at module init time (same as the original config.ts behavior).
 // dotenv will NOT override already-set env vars by default.
@@ -26,6 +27,9 @@ export interface PersistedConfig {
     autoApproveFileEdits?: boolean;
     logLevel?: LogLevel;
     extractionMode?: 'legacy' | 'structured';
+    telegramToken?: string;
+    telegramAllowedUserIds?: string[];
+    platforms?: PlatformType[];
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +103,15 @@ function mergeConfig(persisted: PersistedConfig): AppConfig {
         persisted.extractionMode,
     );
 
+    const telegramToken = process.env.TELEGRAM_BOT_TOKEN ?? persisted.telegramToken ?? undefined;
+
+    const telegramAllowedUserIds = resolveTelegramAllowedUserIds(persisted);
+
+    const platforms = resolvePlatforms(
+        process.env.PLATFORMS,
+        persisted.platforms,
+    );
+
     return {
         discordToken: token,
         clientId,
@@ -108,6 +121,9 @@ function mergeConfig(persisted: PersistedConfig): AppConfig {
         autoApproveFileEdits,
         logLevel,
         extractionMode,
+        telegramToken,
+        telegramAllowedUserIds,
+        platforms,
     };
 }
 
@@ -145,6 +161,39 @@ function resolveExtractionMode(
     const raw = envValue ?? persistedValue;
     if (raw === 'legacy') return 'legacy';
     return 'structured';
+}
+
+function resolveTelegramAllowedUserIds(persisted: PersistedConfig): string[] | undefined {
+    const envValue = process.env.TELEGRAM_ALLOWED_USER_IDS;
+    if (envValue) {
+        return envValue
+            .split(',')
+            .map((id) => id.trim())
+            .filter((id) => id.length > 0);
+    }
+    if (persisted.telegramAllowedUserIds && persisted.telegramAllowedUserIds.length > 0) {
+        return [...persisted.telegramAllowedUserIds];
+    }
+    return undefined;
+}
+
+const VALID_PLATFORMS: readonly PlatformType[] = ['discord', 'telegram'];
+
+function resolvePlatforms(
+    envValue: string | undefined,
+    persistedValue: PlatformType[] | undefined,
+): PlatformType[] {
+    if (envValue) {
+        const parsed = envValue
+            .split(',')
+            .map((p) => p.trim().toLowerCase())
+            .filter((p): p is PlatformType => VALID_PLATFORMS.includes(p as PlatformType));
+        if (parsed.length > 0) return parsed;
+    }
+    if (persistedValue && persistedValue.length > 0) {
+        return [...persistedValue];
+    }
+    return ['discord'];
 }
 
 function resolveBoolean(
