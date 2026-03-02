@@ -156,8 +156,18 @@ async function sendPromptToAntigravity(
         channelManager: ChannelManager;
         titleGenerator: TitleGeneratorService;
         userPrefRepo?: UserPreferenceRepository;
+        onFullCompletion?: () => void;
     }
 ): Promise<void> {
+    // Completion signal — called exactly once when the entire prompt lifecycle ends
+    let completionSignaled = false;
+    const signalCompletion = (exitPath: string) => {
+        if (completionSignaled) return;
+        completionSignaled = true;
+        logger.debug(`[sendPrompt:${message.channelId}] signalCompletion via ${exitPath}`);
+        options?.onFullCompletion?.();
+    };
+
     // Resolve output format once at the start (no mid-response switches)
     const outputFormat: OutputFormat = options?.userPrefRepo?.getOutputFormat(message.author.id) ?? 'embed';
 
@@ -314,6 +324,7 @@ async function sendPromptToAntigravity(
         );
         await clearWatchingReaction();
         await message.react('❌').catch(() => { });
+        signalCompletion('cdp-disconnected');
         return;
     }
 
@@ -546,6 +557,7 @@ async function sendPromptToAntigravity(
             );
             await clearWatchingReaction();
             await message.react('❌').catch(() => { });
+            signalCompletion('inject-failed');
             return;
         }
 
@@ -601,14 +613,15 @@ async function sendPromptToAntigravity(
             onComplete: async (finalText) => {
                 isFinalized = true;
 
-                // If the user explicitly pressed /stop, skip output display entirely
-                const wasStoppedByUser = userStopRequestedChannels.delete(message.channelId);
-                if (wasStoppedByUser) {
-                    logger.info(`[sendPromptToAntigravity:${monitorTraceId}] Stopped by user — skipping output`);
-                    await clearWatchingReaction();
-                    await message.react('⏹️').catch(() => { });
-                    return;
-                }
+                try {
+                    // If the user explicitly pressed /stop, skip output display entirely
+                    const wasStoppedByUser = userStopRequestedChannels.delete(message.channelId);
+                    if (wasStoppedByUser) {
+                        logger.info(`[sendPromptToAntigravity:${monitorTraceId}] Stopped by user — skipping output`);
+                        await clearWatchingReaction();
+                        await message.react('⏹️').catch(() => { });
+                        return;
+                    }
 
                 try {
                     const elapsed = Math.round((Date.now() - startTime) / 1000);
@@ -756,6 +769,9 @@ async function sendPromptToAntigravity(
                 } catch (error) {
                     logger.error(`[sendPromptToAntigravity:${monitorTraceId}] onComplete failed:`, error);
                 }
+                } finally {
+                    signalCompletion('onComplete');
+                }
             },
 
             onTimeout: async (lastText) => {
@@ -801,6 +817,8 @@ async function sendPromptToAntigravity(
                     await message.react('⚠️').catch(() => { });
                 } catch (error) {
                     logger.error(`[sendPromptToAntigravity:${monitorTraceId}] onTimeout failed:`, error);
+                } finally {
+                    signalCompletion('onTimeout');
                 }
             },
         });
@@ -838,6 +856,7 @@ async function sendPromptToAntigravity(
         );
         await clearWatchingReaction();
         await message.react('❌').catch(() => { });
+        signalCompletion('top-level-catch');
     }
 }
 
