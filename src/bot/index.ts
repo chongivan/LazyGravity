@@ -1306,14 +1306,28 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     `<i>Started at ${new Date().toLocaleString()}</i>`,
                 ].join('\n');
 
+                const sendWithRetry = async (chatId: number | string, text: string, retries = 3, delayMs = 2000): Promise<void> => {
+                    for (let attempt = 1; attempt <= retries; attempt++) {
+                        try {
+                            await telegramBot.api.sendMessage(chatId, text, { parse_mode: 'HTML' });
+                            return;
+                        } catch (err) {
+                            if (attempt < retries) {
+                                logger.debug(`[Telegram] Startup message attempt ${attempt}/${retries} failed, retrying in ${delayMs}ms...`);
+                                await new Promise((r) => setTimeout(r, delayMs));
+                            } else {
+                                throw err;
+                            }
+                        }
+                    }
+                };
+
                 const results = await Promise.allSettled(
-                    bindings.map((binding) =>
-                        telegramBot.api.sendMessage(binding.chatId, startupText, { parse_mode: 'HTML' }),
-                    ),
+                    bindings.map((binding) => sendWithRetry(binding.chatId, startupText)),
                 );
                 const failed = results.filter((r) => r.status === 'rejected');
                 if (failed.length > 0) {
-                    logger.warn(`[Telegram] Startup message failed for ${failed.length}/${bindings.length} chat(s): ${(failed[0] as PromiseRejectedResult).reason?.message ?? 'unknown error'}`);
+                    logger.warn(`[Telegram] Startup message failed for ${failed.length}/${bindings.length} chat(s) after retries: ${(failed[0] as PromiseRejectedResult).reason?.message ?? 'unknown error'}`);
                 } else {
                     logger.info(`Telegram startup message sent to ${bindings.length} bound chat(s).`);
                 }
