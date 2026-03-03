@@ -197,6 +197,9 @@ describe('TelegramAdapter', () => {
     });
 
     describe('event handling - message:text', () => {
+        /** Return a Unix timestamp (seconds) representing "now" for test messages. */
+        const nowUnix = () => Math.floor(Date.now() / 1000);
+
         it('calls onMessage with a PlatformMessage', async () => {
             const bot = createMockBot();
             const events = createMockEvents();
@@ -214,9 +217,12 @@ describe('TelegramAdapter', () => {
                     },
                     chat: { id: 1, title: 'Group', type: 'group' },
                     text: 'Hello bot',
-                    date: 1700000000,
+                    date: nowUnix(),
                 },
             });
+
+            // Fire-and-forget: flush microtasks
+            await new Promise((r) => setTimeout(r, 10));
 
             expect(events.onMessage).toHaveBeenCalledTimes(1);
             const msg = events.onMessage.mock.calls[0][0];
@@ -239,7 +245,7 @@ describe('TelegramAdapter', () => {
                     from: { id: 1, first_name: 'X', is_bot: false },
                     chat: { id: 1, type: 'private' },
                     text: 'Hi',
-                    date: 1700000000,
+                    date: nowUnix(),
                 },
             });
         });
@@ -258,12 +264,39 @@ describe('TelegramAdapter', () => {
                     from: { id: 1, first_name: 'X', is_bot: false },
                     chat: { id: 1, type: 'private' },
                     text: 'fail',
-                    date: 1700000000,
+                    date: nowUnix(),
                 },
             });
 
+            // Fire-and-forget: flush microtasks so .catch() fires
+            await new Promise((r) => setTimeout(r, 10));
+
             expect(events.onError).toHaveBeenCalledTimes(1);
             expect(events.onError.mock.calls[0][0].message).toBe('Handler failure');
+        });
+
+        it('ignores messages sent before adapter started (stale backlog)', async () => {
+            const bot = createMockBot();
+            const events = createMockEvents();
+            const adapter = new TelegramAdapter(bot, 'bot_1');
+
+            await adapter.start(events);
+
+            // Send a message with a timestamp 60 seconds before startup
+            const staleDate = Math.floor(Date.now() / 1000) - 60;
+            await bot.emit('message:text', {
+                message: {
+                    message_id: 99,
+                    from: { id: 1, first_name: 'X', is_bot: false },
+                    chat: { id: 1, type: 'private' },
+                    text: 'Old message',
+                    date: staleDate,
+                },
+            });
+
+            await new Promise((r) => setTimeout(r, 10));
+
+            expect(events.onMessage).not.toHaveBeenCalled();
         });
     });
 

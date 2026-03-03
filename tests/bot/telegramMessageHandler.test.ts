@@ -555,6 +555,137 @@ describe('createTelegramMessageHandler', () => {
         },
     );
 
+    describe('mode push to Antigravity on CDP connect', () => {
+        it('pushes ModeService mode to Antigravity on connect', async () => {
+            const mockCdp = {
+                ...createMockCdp(),
+                setUiMode: jest.fn().mockResolvedValue({ ok: true }),
+            };
+            const pool = createMockPool(mockCdp);
+            const bridge = createBridge(pool);
+            const binding = { chatId: 'chat-123', workspacePath: '/workspace/a' };
+            const telegramBindingRepo = createTelegramBindingRepo(binding);
+            const modeService = {
+                getCurrentMode: jest.fn().mockReturnValue('fast'),
+                markSynced: jest.fn(),
+            } as any;
+            const { message } = createMockMessage();
+
+            const handler = createTelegramMessageHandler({ bridge, telegramBindingRepo, modeService });
+            await handler(message as any);
+
+            expect(mockCdp.setUiMode).toHaveBeenCalledWith('fast');
+            expect(modeService.markSynced).toHaveBeenCalled();
+        });
+
+        it('pushes user-selected mode (plan) to Antigravity', async () => {
+            const mockCdp = {
+                ...createMockCdp(),
+                setUiMode: jest.fn().mockResolvedValue({ ok: true }),
+            };
+            const pool = createMockPool(mockCdp);
+            const bridge = createBridge(pool);
+            const binding = { chatId: 'chat-123', workspacePath: '/workspace/a' };
+            const telegramBindingRepo = createTelegramBindingRepo(binding);
+            const modeService = {
+                getCurrentMode: jest.fn().mockReturnValue('plan'),
+                markSynced: jest.fn(),
+            } as any;
+            const { message } = createMockMessage();
+
+            const handler = createTelegramMessageHandler({ bridge, telegramBindingRepo, modeService });
+            await handler(message as any);
+
+            expect(mockCdp.setUiMode).toHaveBeenCalledWith('plan');
+            expect(modeService.markSynced).toHaveBeenCalled();
+        });
+
+        it('does not crash when mode push fails', async () => {
+            const mockCdp = {
+                ...createMockCdp(),
+                setUiMode: jest.fn().mockResolvedValue({ ok: false, error: 'mode not found' }),
+            };
+            const pool = createMockPool(mockCdp);
+            const bridge = createBridge(pool);
+            const binding = { chatId: 'chat-123', workspacePath: '/workspace/a' };
+            const telegramBindingRepo = createTelegramBindingRepo(binding);
+            const modeService = {
+                getCurrentMode: jest.fn().mockReturnValue('plan'),
+                markSynced: jest.fn(),
+            } as any;
+            const { message } = createMockMessage();
+
+            const handler = createTelegramMessageHandler({ bridge, telegramBindingRepo, modeService });
+            await expect(handler(message as any)).resolves.toBeUndefined();
+
+            expect(mockCdp.setUiMode).toHaveBeenCalledWith('plan');
+            expect(modeService.markSynced).not.toHaveBeenCalled();
+        });
+
+        it('does not attempt sync when modeService is not provided', async () => {
+            const mockCdp = {
+                ...createMockCdp(),
+                setUiMode: jest.fn(),
+            };
+            const pool = createMockPool(mockCdp);
+            const bridge = createBridge(pool);
+            const binding = { chatId: 'chat-123', workspacePath: '/workspace/a' };
+            const telegramBindingRepo = createTelegramBindingRepo(binding);
+            const { message } = createMockMessage();
+
+            const handler = createTelegramMessageHandler({ bridge, telegramBindingRepo });
+            await handler(message as any);
+
+            expect(mockCdp.setUiMode).not.toHaveBeenCalled();
+        });
+    });
+
+    describe('activeMonitors registration', () => {
+        it('registers monitor in activeMonitors map during response monitoring', async () => {
+            const { ResponseMonitor } = jest.requireMock('../../src/services/responseMonitor');
+            ResponseMonitor.mockImplementationOnce((opts: any) => {
+                const monitor = {
+                    start: jest.fn().mockImplementation(async () => {
+                        if (opts.onComplete) await opts.onComplete('Response');
+                    }),
+                };
+                return monitor;
+            });
+
+            const mockCdp = createMockCdp();
+            const pool = createMockPool(mockCdp);
+            const bridge = createBridge(pool);
+            const binding = { chatId: 'chat-123', workspacePath: '/workspace/a' };
+            const telegramBindingRepo = createTelegramBindingRepo(binding);
+            const activeMonitors = new Map<string, any>();
+            const { message } = createMockMessage();
+
+            const handler = createTelegramMessageHandler({ bridge, telegramBindingRepo, activeMonitors });
+            await handler(message as any);
+
+            // After completion, monitor should have been removed from the map
+            expect(activeMonitors.size).toBe(0);
+        });
+
+        it('passes activeMonitors to command handler for /stop access', async () => {
+            const mockCdp = createMockCdp();
+            const pool = createMockPool(mockCdp);
+            const bridge = createBridge(pool);
+            const telegramBindingRepo = createTelegramBindingRepo({
+                chatId: 'chat-123',
+                workspacePath: '/workspace/a',
+            });
+            const activeMonitors = new Map<string, any>();
+            const { message } = createMockMessage({ content: '/stop' });
+
+            const handler = createTelegramMessageHandler({ bridge, telegramBindingRepo, activeMonitors });
+            await handler(message as any);
+
+            // /stop is intercepted as a command — CDP path not reached
+            expect(pool.getOrConnect).not.toHaveBeenCalled();
+        });
+    });
+
     it('forwards unknown slash commands to Antigravity as normal messages', async () => {
         const mockCdp = createMockCdp();
         const pool = createMockPool(mockCdp);

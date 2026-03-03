@@ -33,6 +33,8 @@ export class TelegramAdapter implements PlatformAdapter {
     private events: PlatformAdapterEvents | null = null;
     private started = false;
     private handlersRegistered = false;
+    /** Timestamp when the adapter started — messages older than this are discarded. */
+    private startedAt: number = 0;
 
     constructor(bot: TelegramBotLike, botUserId: string) {
         this.bot = bot;
@@ -51,6 +53,8 @@ export class TelegramAdapter implements PlatformAdapter {
         }
 
         this.events = events;
+        // Round down to whole seconds to match Telegram's second-precision timestamps
+        this.startedAt = Math.floor(Date.now() / 1000) * 1000;
         if (!this.handlersRegistered) {
             this.registerHandlers();
             this.handlersRegistered = true;
@@ -123,14 +127,29 @@ export class TelegramAdapter implements PlatformAdapter {
                 const msg: TelegramMessageLike = ctx.message ?? ctx.msg;
                 if (!msg) return;
 
-                const msgDate = msg.date ? new Date(msg.date * 1000) : null;
-                const delayMs = msgDate ? Date.now() - msgDate.getTime() : null;
+                const msgTimestampMs = msg.date ? msg.date * 1000 : 0;
+                const delayMs = msgTimestampMs ? Date.now() - msgTimestampMs : null;
                 logger.debug(
                     `[TelegramAdapter] message:text received (chat=${msg.chat.id}, delay=${delayMs !== null ? `${delayMs}ms` : 'unknown'})`,
                 );
 
+                // Discard messages sent before the adapter started (stale backlog)
+                if (msgTimestampMs && msgTimestampMs < this.startedAt) {
+                    logger.info(
+                        `[TelegramAdapter] Ignoring stale message (chat=${msg.chat.id}, age=${Math.round((this.startedAt - msgTimestampMs) / 1000)}s before startup)`,
+                    );
+                    return;
+                }
+
                 const platformMessage = wrapTelegramMessage(msg, this.bot.api, this.bot.toInputFile);
-                await this.events.onMessage(platformMessage);
+                // Fire-and-forget: do NOT await so grammY's update loop stays
+                // unblocked. This allows /stop and other commands to be received
+                // while a long-running response is being monitored.
+                // The workspace queue in telegramMessageHandler serializes
+                // actual prompt processing per workspace.
+                this.events.onMessage(platformMessage).catch((error) => {
+                    this.emitError(error);
+                });
             } catch (error) {
                 this.emitError(error);
             }

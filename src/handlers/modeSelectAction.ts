@@ -34,36 +34,46 @@ export function createModeSelectAction(deps: ModeSelectActionDeps): SelectAction
             const selectedMode = values[0];
             if (!selectedMode) return;
 
-            await interaction.deferUpdate();
-
-            const result = deps.modeService.setMode(selectedMode);
-            if (!result.success) {
-                await interaction.followUp({ text: result.error ?? 'Invalid mode.' }).catch(() => {});
+            // Validate mode name before any side effects
+            const normalized = selectedMode.trim().toLowerCase();
+            if (!['fast', 'plan'].includes(normalized)) {
+                await interaction.followUp({ text: `Invalid mode: ${selectedMode}` }).catch(() => {});
                 return;
             }
 
-            // Sync to Antigravity UI
+            await interaction.deferUpdate();
+
+            // CDP-first: try to sync to Antigravity immediately
             const cdp = getCurrentCdp(deps.bridge);
-            let syncWarning = '';
+            const displayName = MODE_DISPLAY_NAMES[selectedMode] || selectedMode;
+
             if (cdp) {
                 const res = await cdp.setUiMode(selectedMode);
                 if (!res.ok) {
                     logger.warn(`[ModeSelect] UI mode switch failed: ${res.error}`);
-                    syncWarning = '\n⚠️ Antigravity sync failed — mode set locally only.';
+                    await interaction.followUp({
+                        text: `Failed to switch mode in Antigravity: ${res.error}`,
+                    }).catch(() => {});
+                    return;
                 }
+                // CDP sync succeeded — update local cache as synced
+                deps.modeService.setMode(selectedMode, true);
+
+                const payload = buildModePayload(deps.modeService.getCurrentMode());
+                await interaction.update(payload);
+                await interaction.followUp({
+                    text: `Mode changed to ${displayName}.`,
+                }).catch(() => {});
             } else {
-                syncWarning = '\n⚠️ Not connected to Antigravity — mode set locally only.';
+                // No CDP — set locally as pending
+                deps.modeService.setMode(selectedMode, false);
+
+                const payload = buildModePayload(deps.modeService.getCurrentMode(), true);
+                await interaction.update(payload);
+                await interaction.followUp({
+                    text: `Mode set to ${displayName}. Will sync when connected to Antigravity.`,
+                }).catch(() => {});
             }
-
-            // Refresh the mode UI in the original message
-            const payload = buildModePayload(deps.modeService.getCurrentMode());
-            await interaction.update(payload);
-
-            // Confirmation
-            const displayName = MODE_DISPLAY_NAMES[selectedMode] || selectedMode;
-            await interaction.followUp({
-                text: `Mode changed to ${displayName}.${syncWarning}`,
-            }).catch(() => {});
         },
     };
 }

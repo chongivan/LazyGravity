@@ -33,15 +33,22 @@ function createMockInteraction() {
 }
 
 describe('createModeSelectAction', () => {
-    const modeService = {
-        getCurrentMode: jest.fn().mockReturnValue('fast'),
-        setMode: jest.fn().mockReturnValue({ success: true, mode: 'plan' }),
-    } as any;
+    let modeService: any;
+    let bridge: any;
 
-    const bridge = {
-        lastActiveWorkspace: null,
-        pool: { getConnected: jest.fn().mockReturnValue(null) },
-    } as any;
+    beforeEach(() => {
+        jest.clearAllMocks();
+        modeService = {
+            getCurrentMode: jest.fn().mockReturnValue('fast'),
+            setMode: jest.fn().mockReturnValue({ success: true, mode: 'plan' }),
+            isPendingSync: jest.fn().mockReturnValue(false),
+            markSynced: jest.fn(),
+        };
+        bridge = {
+            lastActiveWorkspace: null,
+            pool: { getConnected: jest.fn().mockReturnValue(null) },
+        };
+    });
 
     it('matches mode_select customId', () => {
         const action = createModeSelectAction({ bridge, modeService });
@@ -53,7 +60,7 @@ describe('createModeSelectAction', () => {
         expect(action.match('other_select')).toBe(false);
     });
 
-    it('sets mode and warns when CDP is not connected', async () => {
+    it('sets mode as pending and shows sync message when CDP is not connected', async () => {
         (getCurrentCdp as jest.Mock).mockReturnValue(null);
         const action = createModeSelectAction({ bridge, modeService });
         const interaction = createMockInteraction();
@@ -61,18 +68,17 @@ describe('createModeSelectAction', () => {
         await action.execute(interaction as any, ['plan']);
 
         expect(interaction.deferUpdate).toHaveBeenCalled();
-        expect(modeService.setMode).toHaveBeenCalledWith('plan');
-        expect(buildModePayload).toHaveBeenCalled();
+        expect(modeService.setMode).toHaveBeenCalledWith('plan', false);
+        expect(buildModePayload).toHaveBeenCalledWith('fast', true);
         expect(interaction.update).toHaveBeenCalled();
-        // Should include warning about no CDP connection
         expect(interaction.followUp).toHaveBeenCalledWith(
             expect.objectContaining({
-                text: expect.stringContaining('Not connected to Antigravity'),
+                text: expect.stringContaining('Will sync when connected to Antigravity'),
             }),
         );
     });
 
-    it('syncs mode to CDP when available', async () => {
+    it('syncs mode to CDP when available and sets as synced', async () => {
         const mockCdp = { setUiMode: jest.fn().mockResolvedValue({ ok: true }) };
         (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
         const action = createModeSelectAction({ bridge, modeService });
@@ -81,15 +87,15 @@ describe('createModeSelectAction', () => {
         await action.execute(interaction as any, ['plan']);
 
         expect(mockCdp.setUiMode).toHaveBeenCalledWith('plan');
-        // No warning when CDP sync succeeds
+        expect(modeService.setMode).toHaveBeenCalledWith('plan', true);
         expect(interaction.followUp).toHaveBeenCalledWith(
             expect.objectContaining({
-                text: expect.not.stringContaining('Antigravity sync failed'),
+                text: 'Mode changed to \u{1F4CB} Plan.',
             }),
         );
     });
 
-    it('warns when CDP sync fails', async () => {
+    it('shows error and does not set mode when CDP sync fails', async () => {
         const mockCdp = { setUiMode: jest.fn().mockResolvedValue({ ok: false, error: 'timeout' }) };
         (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
         const action = createModeSelectAction({ bridge, modeService });
@@ -97,10 +103,21 @@ describe('createModeSelectAction', () => {
 
         await action.execute(interaction as any, ['plan']);
 
+        expect(modeService.setMode).not.toHaveBeenCalled();
         expect(interaction.followUp).toHaveBeenCalledWith(
             expect.objectContaining({
-                text: expect.stringContaining('Antigravity sync failed'),
+                text: expect.stringContaining('Failed to switch mode in Antigravity'),
             }),
         );
+    });
+
+    it('does nothing when values array is empty', async () => {
+        const action = createModeSelectAction({ bridge, modeService });
+        const interaction = createMockInteraction();
+
+        await action.execute(interaction as any, []);
+
+        expect(interaction.deferUpdate).not.toHaveBeenCalled();
+        expect(modeService.setMode).not.toHaveBeenCalled();
     });
 });

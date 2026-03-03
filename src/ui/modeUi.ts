@@ -23,8 +23,11 @@ export interface ModeUiDeps {
 
 /**
  * Build a platform-agnostic MessagePayload for mode selection UI.
+ * @param currentMode The current mode name
+ * @param isPending Whether the mode is pending sync to Antigravity
  */
-export function buildModePayload(currentMode: string): MessagePayload {
+export function buildModePayload(currentMode: string, isPending: boolean = false): MessagePayload {
+    const pendingSuffix = isPending ? ' (pending sync)' : '';
     const rc = withTimestamp(
         withFooter(
             withDescription(
@@ -32,7 +35,7 @@ export function buildModePayload(currentMode: string): MessagePayload {
                     withTitle(createRichContent(), 'Mode Management'),
                     0x57F287,
                 ),
-                `**Current Mode:** ${MODE_DISPLAY_NAMES[currentMode] || currentMode}\n` +
+                `**Current Mode:** ${MODE_DISPLAY_NAMES[currentMode] || currentMode}${pendingSuffix}\n` +
                 `${MODE_DESCRIPTIONS[currentMode] || ''}\n\n` +
                 `**Available Modes (${AVAILABLE_MODES.length})**\n` +
                 AVAILABLE_MODES.map(m => {
@@ -80,7 +83,7 @@ export async function sendModeUI(
         if (cdp) {
             const liveMode = await cdp.getCurrentMode();
             if (liveMode) {
-                modeService.setMode(liveMode);
+                modeService.setMode(liveMode, true);
             }
         }
     }
