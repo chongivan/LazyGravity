@@ -44,6 +44,16 @@ describe('createModelButtonAction', () => {
         expect(action.match('model_refresh_btn')).toEqual({ action: 'refresh' });
     });
 
+    it('matches model_set_default_btn customId', () => {
+        const action = createModelButtonAction({ bridge, fetchQuota });
+        expect(action.match('model_set_default_btn')).toEqual({ action: 'set_default' });
+    });
+
+    it('matches model_clear_default_btn customId', () => {
+        const action = createModelButtonAction({ bridge, fetchQuota });
+        expect(action.match('model_clear_default_btn')).toEqual({ action: 'clear_default' });
+    });
+
     it('does not match unrelated customIds', () => {
         const action = createModelButtonAction({ bridge, fetchQuota });
         expect(action.match('autoaccept_btn_on')).toBeNull();
@@ -89,5 +99,61 @@ describe('createModelButtonAction', () => {
         await action.execute(interaction as any, { action: 'refresh' });
 
         expect(interaction.update).toHaveBeenCalled();
+    });
+
+    it('sets current model as default on set_default action', async () => {
+        const mockCdp = {
+            getCurrentModel: jest.fn().mockResolvedValue('active-model'),
+            getUiModels: jest.fn().mockResolvedValue(['active-model']),
+        };
+        (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
+
+        const mockModelService = {
+            setDefaultModel: jest.fn(),
+            getDefaultModel: jest.fn().mockReturnValue('active-model'),
+        };
+        const mockUserPrefRepo = { setDefaultModel: jest.fn() };
+
+        const action = createModelButtonAction({
+            bridge,
+            fetchQuota,
+            modelService: mockModelService as any,
+            userPrefRepo: mockUserPrefRepo as any,
+        });
+        const interaction = createMockInteraction('model_set_default_btn');
+
+        await action.execute(interaction as any, { action: 'set_default' });
+
+        expect(mockModelService.setDefaultModel).toHaveBeenCalledWith('active-model');
+        expect(mockUserPrefRepo.setDefaultModel).toHaveBeenCalledWith('user-1', 'active-model');
+        expect(interaction.followUp).toHaveBeenCalledWith({ text: 'Default model set to active-model.' });
+    });
+
+    it('clears default model on clear_default action', async () => {
+        const mockCdp = {
+            getCurrentModel: jest.fn().mockResolvedValue('some-model'),
+            getUiModels: jest.fn().mockResolvedValue(['some-model']),
+        };
+        (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
+
+        const mockModelService = {
+            setDefaultModel: jest.fn(),
+            getDefaultModel: jest.fn().mockReturnValue(null),
+        };
+        const mockUserPrefRepo = { setDefaultModel: jest.fn() };
+
+        const action = createModelButtonAction({
+            bridge,
+            fetchQuota,
+            modelService: mockModelService as any,
+            userPrefRepo: mockUserPrefRepo as any,
+        });
+        const interaction = createMockInteraction('model_clear_default_btn');
+
+        await action.execute(interaction as any, { action: 'clear_default' });
+
+        expect(mockModelService.setDefaultModel).toHaveBeenCalledWith(null);
+        expect(mockUserPrefRepo.setDefaultModel).toHaveBeenCalledWith('user-1', null);
+        expect(interaction.followUp).toHaveBeenCalledWith({ text: 'Default model cleared.' });
     });
 });

@@ -10,6 +10,7 @@ jest.mock('../../src/utils/logger', () => ({
         warn: jest.fn(),
         error: jest.fn(),
         debug: jest.fn(),
+        done: jest.fn(),
     },
 }));
 
@@ -21,6 +22,7 @@ jest.mock('../../src/services/responseMonitor', () => ({
     RESPONSE_SELECTORS: {
         CLICK_STOP_BUTTON: 'mock_stop_script',
     },
+    ResponseMonitor: jest.fn(),
 }));
 
 jest.mock('../../src/ui/modeUi', () => ({
@@ -109,8 +111,13 @@ function createMockBridge(overrides: Record<string, unknown> = {}) {
     } as any;
 }
 
-function createMockModeService(mode = 'fast') {
-    return { getCurrentMode: jest.fn().mockReturnValue(mode) } as any;
+function createMockModeService(mode = 'fast', isPending = false) {
+    return {
+        getCurrentMode: jest.fn().mockReturnValue(mode),
+        isPendingSync: jest.fn().mockReturnValue(isPending),
+        setMode: jest.fn(),
+        markSynced: jest.fn(),
+    } as any;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +299,44 @@ describe('handleTelegramCommand — /status', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleTelegramCommand — /stop', () => {
-    it('replies "No active workspace connection" when no CDP', async () => {
+    it('stops via active monitor when available', async () => {
+        const mockMonitor = {
+            isActive: jest.fn().mockReturnValue(true),
+            clickStopButton: jest.fn().mockResolvedValue({ ok: true, method: 'css' }),
+        };
+        const activeMonitors = new Map<string, any>([['test-project', mockMonitor]]);
+        const message = createMockMessage();
+        const bridge = createMockBridge({ lastActiveWorkspace: 'test-project' });
+
+        await handleTelegramCommand({ bridge, activeMonitors }, message as any, { command: 'stop', args: '' });
+
+        expect(mockMonitor.clickStopButton).toHaveBeenCalled();
+        expect(message.reply).toHaveBeenCalledWith({ text: 'Generation stopped.' });
+    });
+
+    it('falls back to direct CDP when monitor click fails', async () => {
+        const mockMonitor = {
+            isActive: jest.fn().mockReturnValue(true),
+            clickStopButton: jest.fn().mockResolvedValue({ ok: false, error: 'not found' }),
+        };
+        const activeMonitors = new Map<string, any>([['test-project', mockMonitor]]);
+        const mockCdp = {
+            call: jest.fn().mockResolvedValue({ result: { value: { ok: true, method: 'css' } } }),
+        };
+        (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
+        const message = createMockMessage();
+        const bridge = createMockBridge({ lastActiveWorkspace: 'test-project' });
+
+        await handleTelegramCommand({ bridge, activeMonitors }, message as any, { command: 'stop', args: '' });
+
+        expect(mockCdp.call).toHaveBeenCalledWith('Runtime.evaluate', {
+            expression: 'mock_stop_script',
+            returnByValue: true,
+        });
+        expect(message.reply).toHaveBeenCalledWith({ text: 'Generation stopped.' });
+    });
+
+    it('replies "No active workspace connection" when no CDP and no monitor', async () => {
         (getCurrentCdp as jest.Mock).mockReturnValue(null);
         const message = createMockMessage();
         const bridge = createMockBridge();
@@ -302,9 +346,9 @@ describe('handleTelegramCommand — /stop', () => {
         expect(message.reply).toHaveBeenCalledWith({ text: 'No active workspace connection.' });
     });
 
-    it('clicks stop button and confirms', async () => {
+    it('clicks stop button via direct CDP and confirms (value.ok)', async () => {
         const mockCdp = {
-            call: jest.fn().mockResolvedValue({ result: { value: { clicked: true } } }),
+            call: jest.fn().mockResolvedValue({ result: { value: { ok: true, method: 'css' } } }),
         };
         (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
         const message = createMockMessage();
@@ -316,12 +360,12 @@ describe('handleTelegramCommand — /stop', () => {
             expression: 'mock_stop_script',
             returnByValue: true,
         });
-        expect(message.reply).toHaveBeenCalledWith({ text: 'Stop button clicked.' });
+        expect(message.reply).toHaveBeenCalledWith({ text: 'Generation stopped.' });
     });
 
-    it('reports when stop button is not found', async () => {
+    it('reports when stop button is not found via direct CDP', async () => {
         const mockCdp = {
-            call: jest.fn().mockResolvedValue({ result: { value: { clicked: false } } }),
+            call: jest.fn().mockResolvedValue({ result: { value: { ok: false } } }),
         };
         (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
         const message = createMockMessage();
@@ -345,6 +389,26 @@ describe('handleTelegramCommand — /stop', () => {
         await handleTelegramCommand({ bridge }, message as any, { command: 'stop', args: '' });
 
         expect(message.reply).toHaveBeenCalledWith({ text: 'Failed to click stop button.' });
+    });
+
+    it('skips inactive monitor and falls back to CDP', async () => {
+        const mockMonitor = {
+            isActive: jest.fn().mockReturnValue(false),
+            clickStopButton: jest.fn(),
+        };
+        const activeMonitors = new Map<string, any>([['test-project', mockMonitor]]);
+        const mockCdp = {
+            call: jest.fn().mockResolvedValue({ result: { value: { ok: true, method: 'css' } } }),
+        };
+        (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
+        const message = createMockMessage();
+        const bridge = createMockBridge({ lastActiveWorkspace: 'test-project' });
+
+        await handleTelegramCommand({ bridge, activeMonitors }, message as any, { command: 'stop', args: '' });
+
+        expect(mockMonitor.clickStopButton).not.toHaveBeenCalled();
+        expect(mockCdp.call).toHaveBeenCalled();
+        expect(message.reply).toHaveBeenCalledWith({ text: 'Generation stopped.' });
     });
 });
 
@@ -377,29 +441,42 @@ describe('handleTelegramCommand — /mode', () => {
         expect(message.reply).toHaveBeenCalledWith({ text: 'Mode service not available.' });
     });
 
-    it('sends mode payload when modeService is available', async () => {
-        (getCurrentCdp as jest.Mock).mockReturnValue(null);
+    it('sends mode payload showing ModeService state (not Antigravity)', async () => {
         const message = createMockMessage();
         const bridge = createMockBridge();
-        const modeService = createMockModeService('fast');
+        const modeService = createMockModeService('fast', false);
 
         await handleTelegramCommand({ bridge, modeService }, message as any, { command: 'mode', args: '' });
 
-        expect(buildModePayload).toHaveBeenCalledWith('fast');
+        expect(buildModePayload).toHaveBeenCalledWith('fast', false);
         expect(message.reply).toHaveBeenCalledTimes(1);
     });
 
-    it('syncs with live CDP mode before building payload', async () => {
+    it('sends mode payload with isPending=true when mode is pending', async () => {
+        const message = createMockMessage();
+        const bridge = createMockBridge();
+        const modeService = createMockModeService('plan', true);
+
+        await handleTelegramCommand({ bridge, modeService }, message as any, { command: 'mode', args: '' });
+
+        expect(buildModePayload).toHaveBeenCalledWith('plan', true);
+        expect(message.reply).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not pull mode from Antigravity (ModeService is source of truth)', async () => {
         const mockCdp = { getCurrentMode: jest.fn().mockResolvedValue('plan') };
         (getCurrentCdp as jest.Mock).mockReturnValue(mockCdp);
         const message = createMockMessage();
         const bridge = createMockBridge();
         const modeService = createMockModeService('fast');
-        modeService.setMode = jest.fn();
 
         await handleTelegramCommand({ bridge, modeService }, message as any, { command: 'mode', args: '' });
 
-        expect(modeService.setMode).toHaveBeenCalledWith('plan');
+        // Should NOT call getCurrentMode or overwrite ModeService
+        expect(mockCdp.getCurrentMode).not.toHaveBeenCalled();
+        expect(modeService.setMode).not.toHaveBeenCalled();
+        // Should display ModeService's mode, not Antigravity's
+        expect(buildModePayload).toHaveBeenCalledWith('fast', false);
     });
 });
 
@@ -430,7 +507,7 @@ describe('handleTelegramCommand — /model', () => {
 
         await handleTelegramCommand({ bridge, fetchQuota }, message as any, { command: 'model', args: '' });
 
-        expect(buildModelsPayload).toHaveBeenCalledWith(['model-a', 'model-b'], 'model-a', []);
+        expect(buildModelsPayload).toHaveBeenCalledWith(['model-a', 'model-b'], 'model-a', [], null);
         expect(message.reply).toHaveBeenCalledTimes(1);
     });
 

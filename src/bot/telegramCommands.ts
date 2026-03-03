@@ -19,8 +19,9 @@
 import type { PlatformMessage, MessagePayload } from '../platform/types';
 import type { CdpBridge } from '../services/cdpBridgeManager';
 import { getCurrentCdp } from '../services/cdpBridgeManager';
-import { RESPONSE_SELECTORS } from '../services/responseMonitor';
+import type { ResponseMonitor } from '../services/responseMonitor';
 import type { ModeService } from '../services/modeService';
+import type { ModelService } from '../services/modelService';
 import type { TelegramBindingRepository } from '../database/telegramBindingRepository';
 import type { TemplateRepository } from '../database/templateRepository';
 import { buildModePayload } from '../ui/modeUi';
@@ -81,9 +82,13 @@ export function parseTelegramCommand(text: string): ParsedTelegramCommand | null
 export interface TelegramCommandDeps {
     readonly bridge: CdpBridge;
     readonly modeService?: ModeService;
+    readonly modelService?: ModelService;
     readonly telegramBindingRepo?: TelegramBindingRepository;
     readonly templateRepo?: TemplateRepository;
     readonly fetchQuota?: () => Promise<any[]>;
+    /** Shared map of active ResponseMonitors keyed by project name.
+     *  Used by /stop to halt monitoring and prevent stale re-sends. */
+    readonly activeMonitors?: Map<string, ResponseMonitor>;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +104,9 @@ export async function handleTelegramCommand(
     message: PlatformMessage,
     parsed: ParsedTelegramCommand,
 ): Promise<void> {
+    const argsDisplay = parsed.args ? ` ${parsed.args}` : '';
+    logger.info(`[TelegramCommand] /${parsed.command}${argsDisplay} (chat=${message.channel.id})`);
+
     switch (parsed.command as KnownCommand) {
         case 'start':
             await handleStart(message);
@@ -213,21 +221,44 @@ async function handleStatus(deps: TelegramCommandDeps, message: PlatformMessage)
 }
 
 async function handleStop(deps: TelegramCommandDeps, message: PlatformMessage): Promise<void> {
+    const workspace = deps.bridge.lastActiveWorkspace;
+
+    // Try to use the active ResponseMonitor first (it stops monitoring + clicks stop)
+    if (workspace && deps.activeMonitors) {
+        const monitor = deps.activeMonitors.get(workspace);
+        if (monitor && monitor.isActive()) {
+            logger.info(`[TelegramCommand:stop] Stopping active monitor for ${workspace}...`);
+            const result = await monitor.clickStopButton();
+            if (result.ok) {
+                logger.done(`[TelegramCommand:stop] Stopped via monitor (method=${result.method})`);
+                await message.reply({ text: 'Generation stopped.' }).catch(logger.error);
+                return;
+            }
+            logger.warn(`[TelegramCommand:stop] Monitor clickStopButton failed: ${result.error}`);
+        }
+    }
+
+    // Fallback: try direct CDP call (no active monitor, or monitor click failed)
     const cdp = getCurrentCdp(deps.bridge);
     if (!cdp) {
+        logger.warn('[TelegramCommand:stop] No CDP — lastActiveWorkspace:', workspace ?? '(null)');
         await message.reply({ text: 'No active workspace connection.' }).catch(logger.error);
         return;
     }
 
     try {
+        logger.info('[TelegramCommand:stop] Clicking stop button via direct CDP...');
+        const { RESPONSE_SELECTORS } = await import('../services/responseMonitor');
         const result = await cdp.call(
             'Runtime.evaluate',
             { expression: RESPONSE_SELECTORS.CLICK_STOP_BUTTON, returnByValue: true },
         );
         const value = result?.result?.value;
-        if (value && typeof value === 'object' && value.clicked) {
-            await message.reply({ text: 'Stop button clicked.' }).catch(logger.error);
+        if (value && typeof value === 'object' && value.ok) {
+            logger.done(`[TelegramCommand:stop] Stop button clicked (method=${value.method})`);
+            await message.reply({ text: 'Generation stopped.' }).catch(logger.error);
         } else {
+            logger.warn('[TelegramCommand:stop] Stop button not found — value:', JSON.stringify(value));
             await message.reply({ text: 'Stop button not found (generation may have already finished).' }).catch(logger.error);
         }
     } catch (err: any) {
@@ -246,16 +277,8 @@ async function handleMode(deps: TelegramCommandDeps, message: PlatformMessage): 
         return;
     }
 
-    // Sync with live CDP mode if available
-    const cdp = getCurrentCdp(deps.bridge);
-    if (cdp) {
-        const liveMode = await cdp.getCurrentMode();
-        if (liveMode) {
-            deps.modeService.setMode(liveMode);
-        }
-    }
-
-    const payload = buildModePayload(deps.modeService.getCurrentMode());
+    const isPending = deps.modeService.isPendingSync();
+    const payload = buildModePayload(deps.modeService.getCurrentMode(), isPending);
     await message.reply(payload).catch(logger.error);
 }
 
@@ -269,8 +292,9 @@ async function handleModel(deps: TelegramCommandDeps, message: PlatformMessage):
     const models = await cdp.getUiModels();
     const currentModel = await cdp.getCurrentModel();
     const quotaData = deps.fetchQuota ? await deps.fetchQuota() : [];
+    const defaultModel = deps.modelService?.getDefaultModel() ?? null;
 
-    const payload = buildModelsPayload(models, currentModel, quotaData);
+    const payload = buildModelsPayload(models, currentModel, quotaData, defaultModel);
     if (!payload) {
         await message.reply({ text: 'No models available.' }).catch(logger.error);
         return;

@@ -21,6 +21,7 @@ import { registerSlashCommands } from '../commands/registerSlashCommands';
 
 import { ModeService, AVAILABLE_MODES, MODE_DISPLAY_NAMES, MODE_DESCRIPTIONS, MODE_UI_NAMES } from '../services/modeService';
 import { ModelService } from '../services/modelService';
+import { applyDefaultModel } from '../services/defaultModelApplicator';
 import { TemplateRepository } from '../database/templateRepository';
 import { WorkspaceBindingRepository } from '../database/workspaceBindingRepository';
 import { ChatSessionRepository } from '../database/chatSessionRepository';
@@ -347,6 +348,12 @@ async function sendPromptToAntigravity(
         await message.react('❌').catch(() => { });
         signalCompletion('cdp-disconnected');
         return;
+    }
+
+    // Apply default model preference on CDP connect
+    const defaultModelResult = await applyDefaultModel(cdp, modelService);
+    if (defaultModelResult.stale && defaultModelResult.staleMessage && channel) {
+        await channel.send(defaultModelResult.staleMessage).catch(() => {});
     }
 
     const localMode = modeService.getCurrentMode();
@@ -898,6 +905,17 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
     const modelService = new ModelService();
     const templateRepo = new TemplateRepository(db);
     const userPrefRepo = new UserPreferenceRepository(db);
+
+    // Eagerly load default model from DB (single-user bot optimization)
+    try {
+        const firstUser = db.prepare('SELECT user_id FROM user_preferences LIMIT 1').get() as { user_id: string } | undefined;
+        if (firstUser) {
+            const savedDefault = userPrefRepo.getDefaultModel(firstUser.user_id);
+            modelService.loadDefaultModel(savedDefault);
+        }
+    } catch {
+        // DB may not have user_preferences yet — safe to ignore
+    }
     const workspaceBindingRepo = new WorkspaceBindingRepository(db);
     const chatSessionRepo = new ChatSessionRepository(db);
     const workspaceService = new WorkspaceService(config.workspaceBaseDir);
@@ -1176,14 +1194,17 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
             const telegramBindingRepo = new TelegramBindingRepository(db);
             const telegramAdapter = new TelegramAdapter(telegramBot as any, String(botInfo.id));
 
+            const activeMonitors = new Map<string, ResponseMonitor>();
             const telegramHandler = createTelegramMessageHandler({
                 bridge,
                 telegramBindingRepo,
                 workspaceService,
                 modeService,
+                modelService,
                 extractionMode: config.extractionMode,
                 templateRepo,
                 fetchQuota: () => bridge.quota.fetchQuota(),
+                activeMonitors,
             });
 
             // Compose select handlers: project select + mode select
@@ -1218,7 +1239,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     createApprovalButtonAction({ bridge }),
                     createPlanningButtonAction({ bridge }),
                     createErrorPopupButtonAction({ bridge }),
-                    createModelButtonAction({ bridge, fetchQuota: () => bridge.quota.fetchQuota() }),
+                    createModelButtonAction({ bridge, fetchQuota: () => bridge.quota.fetchQuota(), modelService, userPrefRepo }),
                     createAutoAcceptButtonAction({ autoAcceptService: bridge.autoAccept }),
                     createTemplateButtonAction({ bridge, templateRepo }),
                 ],

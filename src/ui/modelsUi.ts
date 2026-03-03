@@ -28,6 +28,7 @@ export function buildModelsPayload(
     models: string[],
     currentModel: string | null,
     quotaData: any[],
+    defaultModel: string | null = null,
 ): MessagePayload | null {
     if (models.length === 0) return null;
 
@@ -64,6 +65,16 @@ export function buildModelsPayload(
     }
 
     const currentModelFormatted = currentModel ? formatQuota(currentModel, true) : 'Unknown';
+    const defaultLine = defaultModel
+        ? `\n**Default:** ⭐ ${defaultModel}`
+        : '\n**Default:** Not set';
+
+    const modelLines = models.map(m => {
+        const isCurrent = m === currentModel;
+        const isDefault = defaultModel != null && m.toLowerCase() === defaultModel.toLowerCase();
+        const star = isDefault ? ' ⭐' : '';
+        return `${formatQuota(m, isCurrent)}${star}`;
+    }).join('\n');
 
     const rc = withTimestamp(
         withFooter(
@@ -72,9 +83,9 @@ export function buildModelsPayload(
                     withTitle(createRichContent(), 'Model Management'),
                     0x5865F2,
                 ),
-                `**Current Model:**\n${currentModelFormatted}\n\n` +
+                `**Current Model:**\n${currentModelFormatted}${defaultLine}\n\n` +
                 `**Available Models (${models.length})**\n` +
-                models.map(m => formatQuota(m, m === currentModel)).join('\n'),
+                modelLines,
             ),
             'Latest quota information retrieved',
         ),
@@ -86,16 +97,36 @@ export function buildModelsPayload(
 
     for (const mName of models.slice(0, 24)) {
         const safeName = mName.length > 80 ? mName.substring(0, 77) + '...' : mName;
+        const isDefault = defaultModel != null && mName.toLowerCase() === defaultModel.toLowerCase();
         const prefix = mName === currentModel ? '✓ ' : '';
+        const suffix = isDefault ? ' ⭐' : '';
         rows.push({
             components: [{
                 type: 'button',
                 customId: `model_btn_${mName}`,
-                label: `${prefix}${safeName}`,
+                label: `${prefix}${safeName}${suffix}`,
                 style: mName === currentModel ? 'success' : 'secondary',
             }],
         });
     }
+
+    // Default model action buttons
+    const defaultBtnRow: ComponentRow = {
+        components: defaultModel
+            ? [{
+                type: 'button',
+                customId: 'model_clear_default_btn',
+                label: 'Clear Default',
+                style: 'danger',
+            }]
+            : [{
+                type: 'button',
+                customId: 'model_set_default_btn',
+                label: 'Set Current as Default',
+                style: 'primary',
+            }],
+    };
+    rows.push(defaultBtnRow);
 
     rows.push({
         components: [{

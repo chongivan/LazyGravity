@@ -20,6 +20,8 @@ import { splitOutputAndLogs } from '../utils/discordFormatter';
 import { parseTelegramProjectCommand, handleTelegramProjectCommand } from './telegramProjectCommand';
 import { parseTelegramCommand, handleTelegramCommand } from './telegramCommands';
 import type { ModeService } from '../services/modeService';
+import type { ModelService } from '../services/modelService';
+import { applyDefaultModel } from '../services/defaultModelApplicator';
 import { logger } from '../utils/logger';
 import type { ExtractionMode } from '../utils/config';
 
@@ -28,9 +30,13 @@ export interface TelegramMessageHandlerDeps {
     readonly telegramBindingRepo: TelegramBindingRepository;
     readonly workspaceService?: WorkspaceService;
     readonly modeService?: ModeService;
+    readonly modelService?: ModelService;
     readonly extractionMode?: ExtractionMode;
     readonly templateRepo?: import('../database/templateRepository').TemplateRepository;
     readonly fetchQuota?: () => Promise<any[]>;
+    /** Shared map of active ResponseMonitors keyed by project name.
+     *  Used by /stop to halt monitoring and prevent stale re-sends. */
+    readonly activeMonitors?: Map<string, ResponseMonitor>;
 }
 
 /**
@@ -73,9 +79,11 @@ export function createTelegramMessageHandler(deps: TelegramMessageHandlerDeps) {
                 {
                     bridge: deps.bridge,
                     modeService: deps.modeService,
+                    modelService: deps.modelService,
                     telegramBindingRepo: deps.telegramBindingRepo,
                     templateRepo: deps.templateRepo,
                     fetchQuota: deps.fetchQuota,
+                    activeMonitors: deps.activeMonitors,
                 },
                 message,
                 cmd,
@@ -131,6 +139,29 @@ export function createTelegramMessageHandler(deps: TelegramMessageHandlerDeps) {
             deps.bridge.lastActiveChannel = message.channel;
             registerApprovalWorkspaceChannel(deps.bridge, projectName, message.channel);
 
+            // Always push ModeService's mode to Antigravity on CDP connect.
+            // ModeService is the source of truth (what the user sees in /mode UI).
+            // Without this, Antigravity could be in a different mode (e.g. Planning)
+            // while the user believes they're in Fast mode.
+            if (deps.modeService) {
+                const currentMode = deps.modeService.getCurrentMode();
+                const syncRes = await cdp.setUiMode(currentMode);
+                if (syncRes.ok) {
+                    deps.modeService.markSynced();
+                    logger.debug(`[TelegramHandler] Mode pushed to Antigravity: ${currentMode}`);
+                } else {
+                    logger.warn(`[TelegramHandler] Mode push failed: ${syncRes.error}`);
+                }
+            }
+
+            // Apply default model preference on CDP connect
+            if (deps.modelService) {
+                const modelResult = await applyDefaultModel(cdp, deps.modelService);
+                if (modelResult.stale && modelResult.staleMessage) {
+                    await message.reply({ text: modelResult.staleMessage }).catch(logger.error);
+                }
+            }
+
             // Start detectors (platform-agnostic now)
             ensureApprovalDetector(deps.bridge, cdp, projectName);
             ensureErrorPopupDetector(deps.bridge, cdp, projectName);
@@ -167,6 +198,7 @@ export function createTelegramMessageHandler(deps: TelegramMessageHandlerDeps) {
                     if (settled) return;
                     settled = true;
                     clearTimeout(safetyTimer);
+                    deps.activeMonitors?.delete(projectName);
                     resolve();
                 };
 
@@ -255,6 +287,9 @@ export function createTelegramMessageHandler(deps: TelegramMessageHandlerDeps) {
                     monitor.stop().catch(() => {});
                     settle();
                 }, TIMEOUT_MS);
+
+                // Register the monitor so /stop can access and stop it
+                deps.activeMonitors?.set(projectName, monitor);
 
                 monitor.start().catch((err: any) => {
                     logger.error(`[TelegramHandler:${projectName}] monitor.start() failed:`, err?.message || err);
