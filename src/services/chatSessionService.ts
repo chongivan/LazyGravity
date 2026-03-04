@@ -98,7 +98,7 @@ const SCRAPE_PAST_CONVERSATIONS_SCRIPT = `(() => {
 
     // Scope to the side panel to avoid picking up file tab names
     const panel = document.querySelector('.antigravity-agent-side-panel');
-    if (!panel) return { sessions: [] };
+    if (!panel) return null;
 
     const items = [];
     const seen = new Set();
@@ -106,7 +106,7 @@ const SCRAPE_PAST_CONVERSATIONS_SCRIPT = `(() => {
     // Find the scrollable conversation list container within the side panel
     const containers = Array.from(panel.querySelectorAll('div[class*="overflow-auto"], div[class*="overflow-y-scroll"]'));
     const container = containers.find((c) => isVisible(c) && c.querySelectorAll('div[class*="cursor-pointer"]').length > 0);
-    if (!container) return { sessions: [] };
+    if (!container) return null;
 
     // Detect the "Other Conversations" section boundary.
     // Sessions below this header belong to other projects and must be excluded.
