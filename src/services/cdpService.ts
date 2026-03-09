@@ -185,6 +185,15 @@ export class CdpService extends EventEmitter {
                     const idx = this.contexts.findIndex(c => c.id === data.params.executionContextId);
                     if (idx !== -1) this.contexts.splice(idx, 1);
                 }
+                if (data.method === 'Runtime.executionContextsCleared') {
+                    this.contexts.length = 0;
+                    // Re-enable Runtime to re-discover new contexts
+                    this.call('Runtime.disable', {})
+                        .then(() => this.call('Runtime.enable', {}))
+                        .catch(() => {
+                            this.call('Runtime.enable', {}).catch(() => { });
+                        });
+                }
 
                 // Forward CDP events via EventEmitter (Network.*, Runtime.*, etc.)
                 if (data.method) {
