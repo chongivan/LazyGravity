@@ -11,7 +11,7 @@ node_modules/
 *.db-journal
 
 # Build output
-dist/
+# dist/ — tracked in fork for npm git installs (prepare can't compile TS)
 build/
 *.js.map
 *.d.ts
