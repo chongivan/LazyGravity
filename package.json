@@ -22,7 +22,7 @@
     "test:unit": "jest",
     "test:integration": "jest tests/e2e.bot.test.ts",
     "test:watch": "jest --watch",
-    "build": "npx tsc",
+    "build": "./node_modules/.bin/tsc",
     "start": "ts-node src/bin/cli.ts",
     "start:built": "node dist/bin/cli.js",
     "dev": "ts-node-dev --respawn src/bin/cli.ts",
