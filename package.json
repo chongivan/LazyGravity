@@ -22,12 +22,12 @@
     "test:unit": "jest",
     "test:integration": "jest tests/e2e.bot.test.ts",
     "test:watch": "jest --watch",
-    "build": "./node_modules/.bin/tsc",
+    "build": "tsc",
     "start": "ts-node src/bin/cli.ts",
     "start:built": "node dist/bin/cli.js",
     "dev": "ts-node-dev --respawn src/bin/cli.ts",
     "docs:diagram": "mmdc -i docs/diagrams/architecture.mmd -o docs/images/architecture.svg -b transparent",
-    "prepare": "npm run build",
+    "prepare": "test -d dist && echo 'dist/ exists, skipping build' || npm run build",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
