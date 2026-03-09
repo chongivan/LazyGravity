@@ -3,18 +3,20 @@
  *
  * Handles built-in bot commands that can be answered immediately
  * without routing through CDP/Antigravity:
- *   /start      — Welcome message
- *   /help       — List available commands
- *   /status     — Show bot connection status
- *   /stop       — Interrupt active LLM generation
- *   /ping       — Latency check
- *   /mode       — Switch execution mode
- *   /model      — Switch LLM model
- *   /screenshot — Capture Antigravity screenshot
- *   /autoaccept — Toggle auto-accept for approval dialogs
- *   /template   — List and execute prompt templates
- *   /logs       — Show recent log entries
- *   /new        — Start a new chat session
+ *   /start         — Welcome message
+ *   /help          — List available commands
+ *   /status        — Show bot connection status
+ *   /stop          — Interrupt active LLM generation
+ *   /ping          — Latency check
+ *   /mode          — Switch execution mode
+ *   /model         — Switch LLM model
+ *   /screenshot    — Capture Antigravity screenshot
+ *   /autoaccept    — Toggle auto-accept for approval dialogs
+ *   /template      — List and execute prompt templates
+ *   /logs          — Show recent log entries
+ *   /new           — Start a new chat session
+ *   /conversations — List recent conversations
+ *   /switch        — Switch to a conversation by title
  */
 
 import fs from 'fs';
@@ -41,7 +43,7 @@ import { logger } from '../utils/logger';
 // Known commands (used by both parser and /help output)
 // ---------------------------------------------------------------------------
 
-const KNOWN_COMMANDS = ['start', 'help', 'status', 'stop', 'ping', 'mode', 'model', 'screenshot', 'autoaccept', 'template', 'template_add', 'template_delete', 'project_create', 'logs', 'new'] as const;
+const KNOWN_COMMANDS = ['start', 'help', 'status', 'stop', 'ping', 'mode', 'model', 'screenshot', 'autoaccept', 'template', 'template_add', 'template_delete', 'project_create', 'logs', 'new', 'conversations', 'switch'] as const;
 type KnownCommand = typeof KNOWN_COMMANDS[number];
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,12 @@ export async function handleTelegramCommand(
         case 'new':
             await handleNew(deps, message);
             break;
+        case 'conversations':
+            await handleConversations(deps, message);
+            break;
+        case 'switch':
+            await handleSwitch(deps, message, parsed.args);
+            break;
         default:
             // Should not happen — parser filters unknowns
             break;
@@ -200,6 +208,8 @@ async function handleHelp(message: PlatformMessage): Promise<void> {
         '/template_delete — Delete a prompt template',
         '/project_create — Create a new workspace',
         '/new — Start a new chat session',
+        '/conversations — List recent conversations',
+        '/switch — Switch to a conversation by title',
         '/logs — Show recent log entries',
         '/stop — Interrupt active LLM generation',
         '/ping — Check bot latency',
@@ -509,6 +519,109 @@ async function handleNew(deps: TelegramCommandDeps, message: PlatformMessage): P
     } catch (err: any) {
         logger.error('[TelegramCommand:new] startNewChat threw:', err?.message || err);
         await message.reply({ text: 'Failed to start new chat.' }).catch(logger.error);
+    }
+}
+
+async function handleConversations(deps: TelegramCommandDeps, message: PlatformMessage): Promise<void> {
+    if (!deps.chatSessionService) {
+        await message.reply({ text: 'Chat session service not available.' }).catch(logger.error);
+        return;
+    }
+
+    const chatId = message.channel.id;
+    const binding = deps.telegramBindingRepo?.findByChatId(chatId);
+    if (!binding) {
+        await message.reply({
+            text: 'No project is linked to this chat. Use /project to bind a workspace first.',
+        }).catch(logger.error);
+        return;
+    }
+
+    let cdp;
+    try {
+        const workspacePath = deps.workspaceService
+            ? deps.workspaceService.getWorkspacePath(binding.workspacePath)
+            : binding.workspacePath;
+        cdp = await deps.bridge.pool.getOrConnect(workspacePath);
+    } catch (err: any) {
+        logger.error('[TelegramCommand:conversations] CDP connection failed:', err?.message || err);
+        await message.reply({ text: 'Failed to connect to Antigravity.' }).catch(logger.error);
+        return;
+    }
+
+    try {
+        const sessions = await deps.chatSessionService.listAllSessions(cdp);
+        if (sessions.length === 0) {
+            await message.reply({ text: 'No conversations found.' }).catch(logger.error);
+            return;
+        }
+
+        const lines = ['<b>Recent Conversations</b>', ''];
+        sessions.forEach((s, i) => {
+            const marker = s.isActive ? '▶ ' : '  ';
+            const num = `${i + 1}.`;
+            lines.push(`${marker}${num} ${escapeHtml(s.title)}`);
+        });
+        lines.push('', 'Use /switch &lt;title&gt; to switch to a conversation.');
+
+        const text = lines.join('\n');
+        const truncated = text.length > 4096 ? text.slice(0, 4090) + '\n...' : text;
+        await message.reply({ text: truncated }).catch(logger.error);
+    } catch (err: any) {
+        logger.error('[TelegramCommand:conversations]', err?.message || err);
+        await message.reply({ text: 'Failed to list conversations.' }).catch(logger.error);
+    }
+}
+
+async function handleSwitch(deps: TelegramCommandDeps, message: PlatformMessage, args: string): Promise<void> {
+    if (!deps.chatSessionService) {
+        await message.reply({ text: 'Chat session service not available.' }).catch(logger.error);
+        return;
+    }
+
+    const title = args.trim();
+    if (!title) {
+        await message.reply({
+            text: 'Usage: /switch &lt;conversation title&gt;\nExample: /switch Implementing user auth',
+        }).catch(logger.error);
+        return;
+    }
+
+    const chatId = message.channel.id;
+    const binding = deps.telegramBindingRepo?.findByChatId(chatId);
+    if (!binding) {
+        await message.reply({
+            text: 'No project is linked to this chat. Use /project to bind a workspace first.',
+        }).catch(logger.error);
+        return;
+    }
+
+    let cdp;
+    try {
+        const workspacePath = deps.workspaceService
+            ? deps.workspaceService.getWorkspacePath(binding.workspacePath)
+            : binding.workspacePath;
+        cdp = await deps.bridge.pool.getOrConnect(workspacePath);
+    } catch (err: any) {
+        logger.error('[TelegramCommand:switch] CDP connection failed:', err?.message || err);
+        await message.reply({ text: 'Failed to connect to Antigravity.' }).catch(logger.error);
+        return;
+    }
+
+    try {
+        await message.reply({ text: `Switching to "${escapeHtml(title)}"...` }).catch(logger.error);
+        const result = await deps.chatSessionService.activateSessionByTitle(cdp, title);
+        if (result.ok) {
+            await message.reply({ text: `Switched to "${escapeHtml(title)}".` }).catch(logger.error);
+        } else {
+            logger.warn('[TelegramCommand:switch] activateSessionByTitle failed:', result.error);
+            await message.reply({
+                text: `Failed to switch: ${escapeHtml(result.error || 'unknown error')}`,
+            }).catch(logger.error);
+        }
+    } catch (err: any) {
+        logger.error('[TelegramCommand:switch]', err?.message || err);
+        await message.reply({ text: 'Failed to switch conversation.' }).catch(logger.error);
     }
 }
 

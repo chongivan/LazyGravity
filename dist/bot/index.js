@@ -1026,6 +1026,8 @@ const startBot = async (cliLogLevel) => {
                 { command: 'template_delete', description: 'Delete a prompt template' },
                 { command: 'project_create', description: 'Create a new workspace' },
                 { command: 'new', description: 'Start a new chat session' },
+                { command: 'conversations', description: 'List recent conversations' },
+                { command: 'switch', description: 'Switch to a conversation by title' },
                 { command: 'logs', description: 'Show recent log entries' },
                 { command: 'stop', description: 'Interrupt active LLM generation' },
                 { command: 'help', description: 'Show available commands' },

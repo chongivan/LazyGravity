@@ -356,7 +356,7 @@ async function sendPromptToAntigravity(
     // Apply default model preference on CDP connect
     const defaultModelResult = await applyDefaultModel(cdp, modelService);
     if (defaultModelResult.stale && defaultModelResult.staleMessage && channel) {
-        await channel.send(defaultModelResult.staleMessage).catch(() => {});
+        await channel.send(defaultModelResult.staleMessage).catch(() => { });
     }
 
     const localMode = modeService.getCurrentMode();
@@ -657,20 +657,85 @@ async function sendPromptToAntigravity(
                         return;
                     }
 
-                try {
-                    const elapsed = Math.round((Date.now() - startTime) / 1000);
-                    const isQuotaError = monitor.getPhase() === 'quotaReached' || monitor.getQuotaDetected();
+                    try {
+                        const elapsed = Math.round((Date.now() - startTime) / 1000);
+                        const isQuotaError = monitor.getPhase() === 'quotaReached' || monitor.getQuotaDetected();
 
-                    // Quota early exit — skip text extraction, output logging, and embed entirely
-                    if (isQuotaError) {
+                        // Quota early exit — skip text extraction, output logging, and embed entirely
+                        if (isQuotaError) {
+                            const finalLogText = lastActivityLogText || processLogBuffer.snapshot();
+                            if (finalLogText && finalLogText.trim().length > 0) {
+                                logger.divider('Process Log');
+                                console.info(finalLogText);
+                            }
+                            logger.divider();
+
+                            liveActivityUpdateVersion += 1;
+                            await upsertLiveActivityEmbeds(
+                                `${PHASE_ICONS.thinking} Process Log`,
+                                finalLogText || ACTIVITY_PLACEHOLDER,
+                                PHASE_COLORS.thinking,
+                                t(`⏱️ Time: ${elapsed}s | Process log`),
+                                {
+                                    source: 'complete',
+                                    expectedVersion: liveActivityUpdateVersion,
+                                },
+                            );
+
+                            liveResponseUpdateVersion += 1;
+                            await upsertLiveResponseEmbeds(
+                                '⚠️ Model Quota Reached',
+                                'Model quota limit reached. Please wait or switch to a different model.',
+                                0xFF6B6B,
+                                t(`⏱️ Time: ${elapsed}s | Quota Reached`),
+                                {
+                                    source: 'complete',
+                                    expectedVersion: liveResponseUpdateVersion,
+                                },
+                            );
+
+                            try {
+                                const modelsPayload = await buildModelsUI(cdp, () => bridge.quota.fetchQuota());
+                                if (modelsPayload && channel) {
+                                    await channel.send({ ...modelsPayload });
+                                }
+                            } catch (e) {
+                                logger.error('[Quota] Failed to send model selection UI:', e);
+                            }
+
+                            await clearWatchingReaction();
+                            await message.react('⚠️').catch(() => { });
+                            return;
+                        }
+
+                        // Normal path — extract final text
+                        const responseText = (finalText && finalText.trim().length > 0)
+                            ? finalText
+                            : lastProgressText;
+                        const emergencyText = (!responseText || responseText.trim().length === 0)
+                            ? await tryEmergencyExtractText()
+                            : '';
+                        const finalResponseText = responseText && responseText.trim().length > 0
+                            ? responseText
+                            : emergencyText;
+                        const separated = splitOutputAndLogs(finalResponseText);
+                        const finalOutputText = separated.output || finalResponseText;
+                        // Process logs are now collected by onProcessLog callback directly;
+                        // sanitizeActivityLines is NOT applied because it would strip the very
+                        // content we want to display (activity messages, tool names, etc.)
                         const finalLogText = lastActivityLogText || processLogBuffer.snapshot();
                         if (finalLogText && finalLogText.trim().length > 0) {
                             logger.divider('Process Log');
                             console.info(finalLogText);
                         }
+                        if (finalOutputText && finalOutputText.trim().length > 0) {
+                            logger.divider(`Output (${finalOutputText.length} chars)`);
+                            console.info(finalOutputText);
+                        }
                         logger.divider();
 
                         liveActivityUpdateVersion += 1;
+                        const activityVersion = liveActivityUpdateVersion;
                         await upsertLiveActivityEmbeds(
                             `${PHASE_ICONS.thinking} Process Log`,
                             finalLogText || ACTIVITY_PLACEHOLDER,
@@ -678,131 +743,66 @@ async function sendPromptToAntigravity(
                             t(`⏱️ Time: ${elapsed}s | Process log`),
                             {
                                 source: 'complete',
-                                expectedVersion: liveActivityUpdateVersion,
+                                expectedVersion: activityVersion,
                             },
                         );
 
                         liveResponseUpdateVersion += 1;
-                        await upsertLiveResponseEmbeds(
-                            '⚠️ Model Quota Reached',
-                            'Model quota limit reached. Please wait or switch to a different model.',
-                            0xFF6B6B,
-                            t(`⏱️ Time: ${elapsed}s | Quota Reached`),
-                            {
-                                source: 'complete',
-                                expectedVersion: liveResponseUpdateVersion,
-                            },
-                        );
-
-                        try {
-                            const modelsPayload = await buildModelsUI(cdp, () => bridge.quota.fetchQuota());
-                            if (modelsPayload && channel) {
-                                await channel.send({ ...modelsPayload });
-                            }
-                        } catch (e) {
-                            logger.error('[Quota] Failed to send model selection UI:', e);
+                        const responseVersion = liveResponseUpdateVersion;
+                        if (finalOutputText && finalOutputText.trim().length > 0) {
+                            await upsertLiveResponseEmbeds(
+                                `${PHASE_ICONS.complete} Final Output`,
+                                finalOutputText,
+                                PHASE_COLORS.complete,
+                                t(`⏱️ Time: ${elapsed}s | Complete`),
+                                {
+                                    source: 'complete',
+                                    expectedVersion: responseVersion,
+                                },
+                            );
+                        } else {
+                            await upsertLiveResponseEmbeds(
+                                `${PHASE_ICONS.complete} Complete`,
+                                t('Failed to extract response. Use `/screenshot` to verify.'),
+                                PHASE_COLORS.complete,
+                                t(`⏱️ Time: ${elapsed}s | Complete`),
+                                {
+                                    source: 'complete',
+                                    expectedVersion: responseVersion,
+                                },
+                            );
                         }
 
+                        if (options && message.guild) {
+                            try {
+                                const sessionInfo = await options.chatSessionService.getCurrentSessionInfo(cdp);
+                                if (sessionInfo && sessionInfo.hasActiveChat && sessionInfo.title && sessionInfo.title !== t('(Untitled)')) {
+                                    const session = options.chatSessionRepo.findByChannelId(message.channelId);
+                                    const projectName = session
+                                        ? bridge.pool.extractProjectName(session.workspacePath)
+                                        : cdp.getCurrentWorkspaceName();
+                                    if (projectName) {
+                                        registerApprovalSessionChannel(bridge, projectName, sessionInfo.title, wrapDiscordChannel(message.channel as any));
+                                    }
+
+                                    const newName = options.titleGenerator.sanitizeForChannelName(sessionInfo.title);
+                                    if (session && session.displayName !== sessionInfo.title) {
+                                        const formattedName = `${session.sessionNumber}-${newName}`;
+                                        await options.channelManager.renameChannel(message.guild, message.channelId, formattedName);
+                                        options.chatSessionRepo.updateDisplayName(message.channelId, sessionInfo.title);
+                                    }
+                                }
+                            } catch (e) {
+                                logger.error('[Rename] Failed to get title from Antigravity and rename:', e);
+                            }
+                        }
+
+                        await sendGeneratedImages(finalOutputText || '');
                         await clearWatchingReaction();
-                        await message.react('⚠️').catch(() => { });
-                        return;
+                        await message.react(finalOutputText && finalOutputText.trim().length > 0 ? '✅' : '⚠️').catch(() => { });
+                    } catch (error) {
+                        logger.error(`[sendPromptToAntigravity:${monitorTraceId}] onComplete failed:`, error);
                     }
-
-                    // Normal path — extract final text
-                    const responseText = (finalText && finalText.trim().length > 0)
-                        ? finalText
-                        : lastProgressText;
-                    const emergencyText = (!responseText || responseText.trim().length === 0)
-                        ? await tryEmergencyExtractText()
-                        : '';
-                    const finalResponseText = responseText && responseText.trim().length > 0
-                        ? responseText
-                        : emergencyText;
-                    const separated = splitOutputAndLogs(finalResponseText);
-                    const finalOutputText = separated.output || finalResponseText;
-                    // Process logs are now collected by onProcessLog callback directly;
-                    // sanitizeActivityLines is NOT applied because it would strip the very
-                    // content we want to display (activity messages, tool names, etc.)
-                    const finalLogText = lastActivityLogText || processLogBuffer.snapshot();
-                    if (finalLogText && finalLogText.trim().length > 0) {
-                        logger.divider('Process Log');
-                        console.info(finalLogText);
-                    }
-                    if (finalOutputText && finalOutputText.trim().length > 0) {
-                        logger.divider(`Output (${finalOutputText.length} chars)`);
-                        console.info(finalOutputText);
-                    }
-                    logger.divider();
-
-                    liveActivityUpdateVersion += 1;
-                    const activityVersion = liveActivityUpdateVersion;
-                    await upsertLiveActivityEmbeds(
-                        `${PHASE_ICONS.thinking} Process Log`,
-                        finalLogText || ACTIVITY_PLACEHOLDER,
-                        PHASE_COLORS.thinking,
-                        t(`⏱️ Time: ${elapsed}s | Process log`),
-                        {
-                            source: 'complete',
-                            expectedVersion: activityVersion,
-                        },
-                    );
-
-                    liveResponseUpdateVersion += 1;
-                    const responseVersion = liveResponseUpdateVersion;
-                    if (finalOutputText && finalOutputText.trim().length > 0) {
-                        await upsertLiveResponseEmbeds(
-                            `${PHASE_ICONS.complete} Final Output`,
-                            finalOutputText,
-                            PHASE_COLORS.complete,
-                            t(`⏱️ Time: ${elapsed}s | Complete`),
-                            {
-                                source: 'complete',
-                                expectedVersion: responseVersion,
-                            },
-                        );
-                    } else {
-                        await upsertLiveResponseEmbeds(
-                            `${PHASE_ICONS.complete} Complete`,
-                            t('Failed to extract response. Use `/screenshot` to verify.'),
-                            PHASE_COLORS.complete,
-                            t(`⏱️ Time: ${elapsed}s | Complete`),
-                            {
-                                source: 'complete',
-                                expectedVersion: responseVersion,
-                            },
-                        );
-                    }
-
-                    if (options && message.guild) {
-                        try {
-                            const sessionInfo = await options.chatSessionService.getCurrentSessionInfo(cdp);
-                            if (sessionInfo && sessionInfo.hasActiveChat && sessionInfo.title && sessionInfo.title !== t('(Untitled)')) {
-                                const session = options.chatSessionRepo.findByChannelId(message.channelId);
-                                const projectName = session
-                                    ? bridge.pool.extractProjectName(session.workspacePath)
-                                    : cdp.getCurrentWorkspaceName();
-                                if (projectName) {
-                                    registerApprovalSessionChannel(bridge, projectName, sessionInfo.title, wrapDiscordChannel(message.channel as any));
-                                }
-
-                                const newName = options.titleGenerator.sanitizeForChannelName(sessionInfo.title);
-                                if (session && session.displayName !== sessionInfo.title) {
-                                    const formattedName = `${session.sessionNumber}-${newName}`;
-                                    await options.channelManager.renameChannel(message.guild, message.channelId, formattedName);
-                                    options.chatSessionRepo.updateDisplayName(message.channelId, sessionInfo.title);
-                                }
-                            }
-                        } catch (e) {
-                            logger.error('[Rename] Failed to get title from Antigravity and rename:', e);
-                        }
-                    }
-
-                    await sendGeneratedImages(finalOutputText || '');
-                    await clearWatchingReaction();
-                    await message.react(finalOutputText && finalOutputText.trim().length > 0 ? '✅' : '⚠️').catch(() => { });
-                } catch (error) {
-                    logger.error(`[sendPromptToAntigravity:${monitorTraceId}] onComplete failed:`, error);
-                }
                 } finally {
                     signalCompletion('onComplete');
                 }
@@ -950,235 +950,235 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
     // Discord platform — only initialise the Discord client when the platform is enabled
     if (config.platforms.includes('discord')) {
 
-    if (!config.discordToken || !config.clientId) {
-        logger.error('Discord platform enabled but discordToken or clientId is missing. Skipping Discord initialization.');
-    } else {
+        if (!config.discordToken || !config.clientId) {
+            logger.error('Discord platform enabled but discordToken or clientId is missing. Skipping Discord initialization.');
+        } else {
 
-    const discordToken = config.discordToken;
-    const discordClientId = config.clientId;
+            const discordToken = config.discordToken;
+            const discordClientId = config.clientId;
 
-    const client = new Client({
-        intents: [
-            GatewayIntentBits.Guilds,
-            GatewayIntentBits.GuildMessages,
-            GatewayIntentBits.MessageContent,
-        ]
-    });
-
-    const joinHandler = new JoinCommandHandler(chatSessionService, chatSessionRepo, workspaceBindingRepo, channelManager, bridge.pool, workspaceService, client, config.extractionMode);
-
-    client.once(Events.ClientReady, async (readyClient) => {
-        logger.info(`Ready! Logged in as ${readyClient.user.tag} | extractionMode=${config.extractionMode}`);
-
-        try {
-            await registerSlashCommands(discordToken, discordClientId, config.guildId);
-        } catch (error) {
-            logger.warn('Failed to register slash commands, but text commands remain available.');
-        }
-
-        // Startup dashboard embed
-        try {
-            const os = await import('os');
-            const pkg = await import('../../package.json');
-            const version = pkg.default?.version ?? pkg.version ?? 'unknown';
-            const projects = workspaceService.scanWorkspaces();
-
-            // Check CDP connection status
-            const activeWorkspaces = bridge.pool.getActiveWorkspaceNames();
-            const cdpStatus = activeWorkspaces.length > 0
-                ? `Connected (${activeWorkspaces.join(', ')})`
-                : 'Not connected';
-
-            const dashboardEmbed = new EmbedBuilder()
-                .setTitle('LazyGravity Online')
-                .setColor(0x57F287)
-                .addFields(
-                    { name: 'Version', value: version, inline: true },
-                    { name: 'Node.js', value: process.versions.node, inline: true },
-                    { name: 'OS', value: `${os.platform()} ${os.release()}`, inline: true },
-                    { name: 'CDP', value: cdpStatus, inline: true },
-                    { name: 'Model', value: modelService.getCurrentModel(), inline: true },
-                    { name: 'Mode', value: modeService.getCurrentMode(), inline: true },
-                    { name: 'Projects', value: `${projects.length} registered`, inline: true },
-                    { name: 'Extraction', value: config.extractionMode, inline: true },
-                )
-                .setFooter({ text: `Started at ${new Date().toLocaleString()}` })
-                .setTimestamp();
-
-            // Send to the first available text channel in the guild
-            const guild = readyClient.guilds.cache.first();
-            if (guild) {
-                const channel = guild.channels.cache.find(
-                    (ch) => ch.isTextBased() && !ch.isVoiceBased() && ch.permissionsFor(readyClient.user)?.has('SendMessages'),
-                );
-                if (channel && channel.isTextBased()) {
-                    await channel.send({ embeds: [dashboardEmbed] });
-                    logger.info('Startup dashboard embed sent.');
-                }
-            }
-        } catch (error) {
-            logger.warn('Failed to send startup dashboard embed:', error);
-        }
-    });
-
-    // [Discord Interactions API] Slash command interaction handler
-    client.on(Events.InteractionCreate, createInteractionCreateHandler({
-        config,
-        bridge,
-        cleanupHandler,
-        modeService,
-        modelService,
-        slashCommandHandler,
-        wsHandler,
-        chatHandler,
-        client,
-        sendModeUI,
-        sendModelsUI,
-        sendAutoAcceptUI,
-        getCurrentCdp,
-        parseApprovalCustomId,
-        parseErrorPopupCustomId,
-        parsePlanningCustomId,
-        parseRunCommandCustomId,
-        joinHandler,
-        userPrefRepo,
-        handleSlashInteraction: async (
-            interaction,
-            handler,
-            bridgeArg,
-            wsHandlerArg,
-            chatHandlerArg,
-            cleanupHandlerArg,
-            modeServiceArg,
-            modelServiceArg,
-            autoAcceptServiceArg,
-            clientArg,
-        ) => handleSlashInteraction(
-            interaction,
-            handler,
-            bridgeArg,
-            wsHandlerArg,
-            chatHandlerArg,
-            cleanupHandlerArg,
-            modeServiceArg,
-            modelServiceArg,
-            autoAcceptServiceArg,
-            clientArg,
-            promptDispatcher,
-            templateRepo,
-            joinHandler,
-            userPrefRepo,
-        ),
-        handleTemplateUse: async (interaction, templateId) => {
-            const template = templateRepo.findById(templateId);
-            if (!template) {
-                await interaction.followUp({
-                    content: 'Template not found. It may have been deleted.',
-                    flags: MessageFlags.Ephemeral,
-                });
-                return;
-            }
-
-            // Resolve CDP via workspace binding (same flow as text messages)
-            const channelId = interaction.channelId;
-            const workspacePath = wsHandler.getWorkspaceForChannel(channelId);
-
-            let cdp: CdpService | null = null;
-            if (workspacePath) {
-                try {
-                    cdp = await bridge.pool.getOrConnect(workspacePath);
-                    const projectName = bridge.pool.extractProjectName(workspacePath);
-                    bridge.lastActiveWorkspace = projectName;
-                    const platformCh = wrapDiscordChannel(interaction.channel as any);
-                    bridge.lastActiveChannel = platformCh;
-                    registerApprovalWorkspaceChannel(bridge, projectName, platformCh);
-                    const session = chatSessionRepo.findByChannelId(channelId);
-                    if (session?.displayName) {
-                        registerApprovalSessionChannel(bridge, projectName, session.displayName, platformCh);
-                    }
-                    ensureApprovalDetector(bridge, cdp, projectName);
-                    ensureErrorPopupDetector(bridge, cdp, projectName);
-                    ensurePlanningDetector(bridge, cdp, projectName);
-                    ensureRunCommandDetector(bridge, cdp, projectName);
-                } catch (e: any) {
-                    await interaction.followUp({
-                        content: `Failed to connect to workspace: ${e.message}`,
-                        flags: MessageFlags.Ephemeral,
-                    });
-                    return;
-                }
-            } else {
-                cdp = getCurrentCdp(bridge);
-            }
-
-            if (!cdp) {
-                await interaction.followUp({
-                    content: 'Not connected to CDP. Please connect to a project first.',
-                    flags: MessageFlags.Ephemeral,
-                });
-                return;
-            }
-
-            const followUp = await interaction.followUp({
-                content: `Executing template **${template.name}**...`,
+            const client = new Client({
+                intents: [
+                    GatewayIntentBits.Guilds,
+                    GatewayIntentBits.GuildMessages,
+                    GatewayIntentBits.MessageContent,
+                ]
             });
 
-            if (followUp instanceof Message) {
-                await promptDispatcher.send({
-                    message: followUp,
-                    prompt: template.prompt,
+            const joinHandler = new JoinCommandHandler(chatSessionService, chatSessionRepo, workspaceBindingRepo, channelManager, bridge.pool, workspaceService, client, config.extractionMode);
+
+            client.once(Events.ClientReady, async (readyClient) => {
+                logger.info(`Ready! Logged in as ${readyClient.user.tag} | extractionMode=${config.extractionMode}`);
+
+                try {
+                    await registerSlashCommands(discordToken, discordClientId, config.guildId);
+                } catch (error) {
+                    logger.warn('Failed to register slash commands, but text commands remain available.');
+                }
+
+                // Startup dashboard embed
+                try {
+                    const os = await import('os');
+                    const pkg = await import('../../package.json');
+                    const version = pkg.default?.version ?? pkg.version ?? 'unknown';
+                    const projects = workspaceService.scanWorkspaces();
+
+                    // Check CDP connection status
+                    const activeWorkspaces = bridge.pool.getActiveWorkspaceNames();
+                    const cdpStatus = activeWorkspaces.length > 0
+                        ? `Connected (${activeWorkspaces.join(', ')})`
+                        : 'Not connected';
+
+                    const dashboardEmbed = new EmbedBuilder()
+                        .setTitle('LazyGravity Online')
+                        .setColor(0x57F287)
+                        .addFields(
+                            { name: 'Version', value: version, inline: true },
+                            { name: 'Node.js', value: process.versions.node, inline: true },
+                            { name: 'OS', value: `${os.platform()} ${os.release()}`, inline: true },
+                            { name: 'CDP', value: cdpStatus, inline: true },
+                            { name: 'Model', value: modelService.getCurrentModel(), inline: true },
+                            { name: 'Mode', value: modeService.getCurrentMode(), inline: true },
+                            { name: 'Projects', value: `${projects.length} registered`, inline: true },
+                            { name: 'Extraction', value: config.extractionMode, inline: true },
+                        )
+                        .setFooter({ text: `Started at ${new Date().toLocaleString()}` })
+                        .setTimestamp();
+
+                    // Send to the first available text channel in the guild
+                    const guild = readyClient.guilds.cache.first();
+                    if (guild) {
+                        const channel = guild.channels.cache.find(
+                            (ch) => ch.isTextBased() && !ch.isVoiceBased() && ch.permissionsFor(readyClient.user)?.has('SendMessages'),
+                        );
+                        if (channel && channel.isTextBased()) {
+                            await channel.send({ embeds: [dashboardEmbed] });
+                            logger.info('Startup dashboard embed sent.');
+                        }
+                    }
+                } catch (error) {
+                    logger.warn('Failed to send startup dashboard embed:', error);
+                }
+            });
+
+            // [Discord Interactions API] Slash command interaction handler
+            client.on(Events.InteractionCreate, createInteractionCreateHandler({
+                config,
+                bridge,
+                cleanupHandler,
+                modeService,
+                modelService,
+                slashCommandHandler,
+                wsHandler,
+                chatHandler,
+                client,
+                sendModeUI,
+                sendModelsUI,
+                sendAutoAcceptUI,
+                getCurrentCdp,
+                parseApprovalCustomId,
+                parseErrorPopupCustomId,
+                parsePlanningCustomId,
+                parseRunCommandCustomId,
+                joinHandler,
+                userPrefRepo,
+                handleSlashInteraction: async (
+                    interaction,
+                    handler,
+                    bridgeArg,
+                    wsHandlerArg,
+                    chatHandlerArg,
+                    cleanupHandlerArg,
+                    modeServiceArg,
+                    modelServiceArg,
+                    autoAcceptServiceArg,
+                    clientArg,
+                ) => handleSlashInteraction(
+                    interaction,
+                    handler,
+                    bridgeArg,
+                    wsHandlerArg,
+                    chatHandlerArg,
+                    cleanupHandlerArg,
+                    modeServiceArg,
+                    modelServiceArg,
+                    autoAcceptServiceArg,
+                    clientArg,
+                    promptDispatcher,
+                    templateRepo,
+                    joinHandler,
+                    userPrefRepo,
+                ),
+                handleTemplateUse: async (interaction, templateId) => {
+                    const template = templateRepo.findById(templateId);
+                    if (!template) {
+                        await interaction.followUp({
+                            content: 'Template not found. It may have been deleted.',
+                            flags: MessageFlags.Ephemeral,
+                        });
+                        return;
+                    }
+
+                    // Resolve CDP via workspace binding (same flow as text messages)
+                    const channelId = interaction.channelId;
+                    const workspacePath = wsHandler.getWorkspaceForChannel(channelId);
+
+                    let cdp: CdpService | null = null;
+                    if (workspacePath) {
+                        try {
+                            cdp = await bridge.pool.getOrConnect(workspacePath);
+                            const projectName = bridge.pool.extractProjectName(workspacePath);
+                            bridge.lastActiveWorkspace = projectName;
+                            const platformCh = wrapDiscordChannel(interaction.channel as any);
+                            bridge.lastActiveChannel = platformCh;
+                            registerApprovalWorkspaceChannel(bridge, projectName, platformCh);
+                            const session = chatSessionRepo.findByChannelId(channelId);
+                            if (session?.displayName) {
+                                registerApprovalSessionChannel(bridge, projectName, session.displayName, platformCh);
+                            }
+                            ensureApprovalDetector(bridge, cdp, projectName);
+                            ensureErrorPopupDetector(bridge, cdp, projectName);
+                            ensurePlanningDetector(bridge, cdp, projectName);
+                            ensureRunCommandDetector(bridge, cdp, projectName);
+                        } catch (e: any) {
+                            await interaction.followUp({
+                                content: `Failed to connect to workspace: ${e.message}`,
+                                flags: MessageFlags.Ephemeral,
+                            });
+                            return;
+                        }
+                    } else {
+                        cdp = getCurrentCdp(bridge);
+                    }
+
+                    if (!cdp) {
+                        await interaction.followUp({
+                            content: 'Not connected to CDP. Please connect to a project first.',
+                            flags: MessageFlags.Ephemeral,
+                        });
+                        return;
+                    }
+
+                    const followUp = await interaction.followUp({
+                        content: `Executing template **${template.name}**...`,
+                    });
+
+                    if (followUp instanceof Message) {
+                        await promptDispatcher.send({
+                            message: followUp,
+                            prompt: template.prompt,
+                            cdp,
+                            inboundImages: [],
+                            options: {
+                                chatSessionService,
+                                chatSessionRepo,
+                                channelManager,
+                                titleGenerator,
+                                userPrefRepo,
+                                extractionMode: config.extractionMode,
+                            },
+                        });
+                    }
+                },
+            }));
+
+            // [Text message handler]
+            client.on(Events.MessageCreate, createMessageCreateHandler({
+                config,
+                bridge,
+                modeService,
+                modelService,
+                slashCommandHandler,
+                wsHandler,
+                chatSessionService,
+                chatSessionRepo,
+                channelManager,
+                titleGenerator,
+                client,
+                sendPromptToAntigravity: async (
+                    _bridge,
+                    message,
+                    prompt,
                     cdp,
-                    inboundImages: [],
-                    options: {
-                        chatSessionService,
-                        chatSessionRepo,
-                        channelManager,
-                        titleGenerator,
-                        userPrefRepo,
-                        extractionMode: config.extractionMode,
-                    },
-                });
-            }
-        },
-    }));
+                    _modeService,
+                    _modelService,
+                    inboundImages = [],
+                    options,
+                ) => promptDispatcher.send({
+                    message,
+                    prompt,
+                    cdp,
+                    inboundImages,
+                    options,
+                }),
+                autoRenameChannel,
+                handleScreenshot,
+                userPrefRepo,
+            }));
 
-    // [Text message handler]
-    client.on(Events.MessageCreate, createMessageCreateHandler({
-        config,
-        bridge,
-        modeService,
-        modelService,
-        slashCommandHandler,
-        wsHandler,
-        chatSessionService,
-        chatSessionRepo,
-        channelManager,
-        titleGenerator,
-        client,
-        sendPromptToAntigravity: async (
-            _bridge,
-            message,
-            prompt,
-            cdp,
-            _modeService,
-            _modelService,
-            inboundImages = [],
-            options,
-        ) => promptDispatcher.send({
-            message,
-            prompt,
-            cdp,
-            inboundImages,
-            options,
-        }),
-        autoRenameChannel,
-        handleScreenshot,
-        userPrefRepo,
-    }));
+            await client.login(discordToken);
 
-    await client.login(discordToken);
-
-    } // end: else (credentials present)
+        } // end: else (credentials present)
     } // end: Discord platform gate
 
     // Telegram platform
@@ -1281,6 +1281,8 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                 { command: 'template_delete', description: 'Delete a prompt template' },
                 { command: 'project_create', description: 'Create a new workspace' },
                 { command: 'new', description: 'Start a new chat session' },
+                { command: 'conversations', description: 'List recent conversations' },
+                { command: 'switch', description: 'Switch to a conversation by title' },
                 { command: 'logs', description: 'Show recent log entries' },
                 { command: 'stop', description: 'Interrupt active LLM generation' },
                 { command: 'help', description: 'Show available commands' },
