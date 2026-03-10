@@ -17,7 +17,7 @@
  *   /logs          — Show recent log entries
  *   /new           — Start a new chat session
  *   /conversations — List recent conversations
- *   /switch        — Switch to a conversation by title
+ *   /switch        — Switch to a conversation by number or title
  */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
@@ -197,7 +197,7 @@ async function handleHelp(message) {
         '/project_create — Create a new workspace',
         '/new — Start a new chat session',
         '/conversations — List recent conversations',
-        '/switch — Switch to a conversation by title',
+        '/switch — Switch to a conversation by number or title',
         '/logs — Show recent log entries',
         '/stop — Interrupt active LLM generation',
         '/ping — Check bot latency',
@@ -506,7 +506,7 @@ async function handleConversations(deps, message) {
             const num = `${i + 1}.`;
             lines.push(`${marker}${num} ${(0, telegramFormatter_1.escapeHtml)(s.title)}`);
         });
-        lines.push('', 'Use /switch &lt;title&gt; to switch to a conversation.');
+        lines.push('', 'Use /switch &lt;number&gt; to switch to a conversation.');
         const text = lines.join('\n');
         const truncated = text.length > 4096 ? text.slice(0, 4090) + '\n...' : text;
         await message.reply({ text: truncated }).catch(logger_1.logger.error);
@@ -521,10 +521,10 @@ async function handleSwitch(deps, message, args) {
         await message.reply({ text: 'Chat session service not available.' }).catch(logger_1.logger.error);
         return;
     }
-    const title = args.trim();
-    if (!title) {
+    const input = args.trim();
+    if (!input) {
         await message.reply({
-            text: 'Usage: /switch &lt;conversation title&gt;\nExample: /switch Implementing user auth',
+            text: 'Usage: /switch &lt;number&gt;\nExample: /switch 1\n\nUse /conversations to see the list.',
         }).catch(logger_1.logger.error);
         return;
     }
@@ -547,6 +547,30 @@ async function handleSwitch(deps, message, args) {
         logger_1.logger.error('[TelegramCommand:switch] CDP connection failed:', err?.message || err);
         await message.reply({ text: 'Failed to connect to Antigravity.' }).catch(logger_1.logger.error);
         return;
+    }
+    // Resolve input: if it's a number, look up the title from the session list
+    let title = input;
+    const num = parseInt(input, 10);
+    if (!isNaN(num) && String(num) === input) {
+        try {
+            const sessions = await deps.chatSessionService.listAllSessions(cdp);
+            if (sessions.length === 0) {
+                await message.reply({ text: 'No conversations found. Use /conversations to refresh.' }).catch(logger_1.logger.error);
+                return;
+            }
+            if (num < 1 || num > sessions.length) {
+                await message.reply({
+                    text: `Invalid number. Choose 1–${sessions.length}. Use /conversations to see the list.`,
+                }).catch(logger_1.logger.error);
+                return;
+            }
+            title = sessions[num - 1].title;
+        }
+        catch (err) {
+            logger_1.logger.error('[TelegramCommand:switch] listAllSessions failed:', err?.message || err);
+            await message.reply({ text: 'Failed to list conversations for lookup.' }).catch(logger_1.logger.error);
+            return;
+        }
     }
     try {
         await message.reply({ text: `Switching to "${(0, telegramFormatter_1.escapeHtml)(title)}"...` }).catch(logger_1.logger.error);
