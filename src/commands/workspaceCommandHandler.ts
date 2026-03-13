@@ -47,7 +47,7 @@ export class WorkspaceCommandHandler {
                     this.bindingRepo.deleteByChannelId(b.channelId);
                 }
             } catch (error) {
-                logger.info(`[Cleanup] Removed stale binding for deleted channel ${b.channelId} (error during fetch)`);
+                logger.error(`[Cleanup] Failed to remove stale binding for channel ${b.channelId}`, error);
                 this.chatSessionRepo.deleteByChannelId(b.channelId);
                 this.bindingRepo.deleteByChannelId(b.channelId);
             }
