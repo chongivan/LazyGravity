@@ -1,5 +1,6 @@
 import { t } from "../utils/i18n";
 import fs from 'fs';
+import { logger } from '../utils/logger';
 import {
     ButtonInteraction,
     ChatInputCommandInteraction,
@@ -41,9 +42,13 @@ export class WorkspaceCommandHandler {
                 if (channel) {
                     validBindings.push(b);
                 } else {
+                    logger.info(`[Cleanup] Removed stale binding for deleted channel ${b.channelId}`);
+                    this.chatSessionRepo.deleteByChannelId(b.channelId);
                     this.bindingRepo.deleteByChannelId(b.channelId);
                 }
             } catch (error) {
+                logger.info(`[Cleanup] Removed stale binding for deleted channel ${b.channelId} (error during fetch)`);
+                this.chatSessionRepo.deleteByChannelId(b.channelId);
                 this.bindingRepo.deleteByChannelId(b.channelId);
             }
         }

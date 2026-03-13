@@ -142,17 +142,9 @@ export class JoinCommandHandler {
         // Step 1: Check if a channel already exists for this session
         const existingSession = this.chatSessionRepo.findByDisplayName(projectName, selectedTitle);
         if (existingSession) {
-            let channelExists = false;
-            try {
-                const channel = await guild.channels.fetch(existingSession.channelId).catch(() => null);
-                if (channel) {
-                    channelExists = true;
-                }
-            } catch (error) {
-                // Ignore errors, treat as deleted
-            }
+            const channel = await guild.channels.fetch(existingSession.channelId).catch(() => null);
 
-            if (channelExists) {
+            if (channel) {
                 const embed = new EmbedBuilder()
                     .setTitle(t('🔗 Session Already Connected'))
                     .setDescription(t(`This session already has a channel:\n→ <#${existingSession.channelId}>`))
@@ -162,6 +154,7 @@ export class JoinCommandHandler {
                 return;
             } else {
                 // Clean up stale bindings since the channel is gone
+                logger.info(`[Cleanup] Removed stale session binding for deleted channel ${existingSession.channelId}`);
                 this.chatSessionRepo.deleteByChannelId(existingSession.channelId);
                 this.bindingRepo.deleteByChannelId(existingSession.channelId);
             }
