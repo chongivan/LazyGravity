@@ -57,11 +57,13 @@ import {
     ensureApprovalDetector,
     ensureErrorPopupDetector,
     ensurePlanningDetector,
+    ensureRunCommandDetector,
     getCurrentCdp,
     initCdpBridge,
     parseApprovalCustomId,
     parseErrorPopupCustomId,
     parsePlanningCustomId,
+    parseRunCommandCustomId,
     registerApprovalSessionChannel,
     registerApprovalWorkspaceChannel,
 } from '../services/cdpBridgeManager';
@@ -99,6 +101,7 @@ import { createPlatformSelectHandler } from '../handlers/selectHandler';
 import { createApprovalButtonAction } from '../handlers/approvalButtonAction';
 import { createPlanningButtonAction } from '../handlers/planningButtonAction';
 import { createErrorPopupButtonAction } from '../handlers/errorPopupButtonAction';
+import { createRunCommandButtonAction } from '../handlers/runCommandButtonAction';
 import { createModelButtonAction } from '../handlers/modelButtonAction';
 import { createAutoAcceptButtonAction } from '../handlers/autoAcceptButtonAction';
 import { createTemplateButtonAction } from '../handlers/templateButtonAction';
@@ -1036,6 +1039,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
         parseApprovalCustomId,
         parseErrorPopupCustomId,
         parsePlanningCustomId,
+        parseRunCommandCustomId,
         joinHandler,
         userPrefRepo,
         handleSlashInteraction: async (
@@ -1095,6 +1099,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     ensureApprovalDetector(bridge, cdp, projectName);
                     ensureErrorPopupDetector(bridge, cdp, projectName);
                     ensurePlanningDetector(bridge, cdp, projectName);
+                    ensureRunCommandDetector(bridge, cdp, projectName);
                 } catch (e: any) {
                     await interaction.followUp({
                         content: `Failed to connect to workspace: ${e.message}`,
@@ -1247,6 +1252,7 @@ export const startBot = async (cliLogLevel?: LogLevel) => {
                     createApprovalButtonAction({ bridge }),
                     createPlanningButtonAction({ bridge }),
                     createErrorPopupButtonAction({ bridge }),
+                    createRunCommandButtonAction({ bridge }),
                     createModelButtonAction({ bridge, fetchQuota: () => bridge.quota.fetchQuota(), modelService, userPrefRepo }),
                     createAutoAcceptButtonAction({ autoAcceptService: bridge.autoAccept }),
                     createTemplateButtonAction({ bridge, templateRepo }),

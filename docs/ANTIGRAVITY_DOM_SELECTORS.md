@@ -8,13 +8,17 @@ Central reference for all CSS selectors and DOM structures used to interact with
 
 ## Root Scope
 
-All scripts scope queries to the side panel first, falling back to `document`.
+Most scripts scope queries to a specific container first.
 
-```
-.antigravity-agent-side-panel
+```text
+div[class*="bg-quickinput-background"]   ← Past Conversations floating dialog (QuickInput)
+.antigravity-agent-side-panel            ← Main Cascade side panel
 ```
 
-**Used by**: All detectors, all scripts
+- **Past Conversations** opens as a floating QuickInput dialog (`bg-quickinput-background`), **not** inside `.antigravity-agent-side-panel`. Session scraping targets the QuickInput dialog first, then falls back to the side panel.
+- **All other detectors** (planning, approval, response, user message) use selectors inside `.antigravity-agent-side-panel` or `document`.
+
+**Used by**: `chatSessionService.ts` (QuickInput + side panel), all other detectors (side panel)
 
 ---
 
@@ -136,13 +140,16 @@ Selectors for opening, browsing, and selecting past conversations.
 
 ### Scraping Sessions
 
+The Past Conversations panel renders as a floating **QuickInput dialog** (`div[class*="bg-quickinput-background"]`), not inside the side panel. Scripts scope to this dialog first, falling back to `.antigravity-agent-side-panel`.
+
 | Selector | Purpose | File |
 |----------|---------|------|
-| `div[class*="overflow-auto"], div[class*="overflow-y-scroll"]` | Scrollable conversation list container | `chatSessionService.ts` |
-| `div[class*="text-xs"][class*="opacity"]` | Section header (e.g. "Other Conversations") — used as boundary to exclude other-project sessions | `chatSessionService.ts` |
+| `div[class*="bg-quickinput-background"]` | **QuickInput dialog root** (primary scope for scraping) | `chatSessionService.ts` |
+| `div[class*="overflow-auto"], div[class*="overflow-y-scroll"]` | Scrollable conversation list container (inside dialog) | `chatSessionService.ts` |
+| `div[class*="text-xs"][class*="opacity"]` | Section header (e.g. "Current", "Running in ...", "Other Conversations") — "Other Conversations" used as boundary to exclude other-project sessions | `chatSessionService.ts` |
 | `div[class*="cursor-pointer"]` | Session row items (rows below "Other Conversations" boundary are skipped) | `chatSessionService.ts` |
 | `span.text-sm span, span.text-sm` | Session title text | `chatSessionService.ts` |
-| `/focusBackground/i` (className regex) | Active/current session indicator | `chatSessionService.ts` |
+| `/focusBackground/i` (className regex) | Active/current session indicator (matches `bg-quickinput-list-focusBackground`) | `chatSessionService.ts` |
 
 ### Show More
 
@@ -267,6 +274,56 @@ Antigravity renders code blocks in a non-standard way.
 | `style` | Injected CSS (removed during normalization) | `assistantDomExtractor.ts` |
 | `[class*="rounded-t"][class*="border-b"]` | Header bar (removed during normalization) | `assistantDomExtractor.ts` |
 | `.code-line, [class*="code-line"]` | Individual code lines | `assistantDomExtractor.ts` |
+
+---
+
+## 12. Run Command Approval
+
+Terminal command execution confirmation dialog (Run/Reject).
+
+> **Last verified**: 2026-03 (DOM provided by user in [#81](https://github.com/tokyoweb3/LazyGravity/issues/81))
+
+### Verified DOM Structure
+
+```html
+<div class="flex flex-col gap-2 border-gray-500/25 border rounded-lg my-1">
+  <div>
+    <div class="mb-1 px-2 py-1 text-sm border-b border-gray-500/25 ...">
+      <span class="opacity-60">Run command?</span>
+    </div>
+    <div class="flex grow items-start justify-between px-2 py-1 cursor-pointer">
+      <pre class="whitespace-pre-wrap break-all font-mono text-sm">
+        <span class="... opacity-50">~/Code/login</span>
+        <span class="opacity-50"> $ </span>python3 -m http.server 8000
+      </pre>
+    </div>
+    <div class="flex ... border-t border-gray-500/25 ...">
+      <!-- Permission dropdown: "Ask every time" -->
+      <button>Reject</button>    <!-- bg-secondary -->
+      <button>Run</button>       <!-- bg-primary, split button with chevron -->
+    </div>
+  </div>
+</div>
+```
+
+### Detection
+
+| Selector | Purpose | File |
+|----------|---------|------|
+| `span` with text matching `run command?` | Header text identifying the dialog | `runCommandDetector.ts` |
+| `div[class*="rounded-lg"][class*="border"]` | Dialog container (closest ancestor of header) | `runCommandDetector.ts` |
+| `pre` (inside container) | Command text display (`<dir> $ <command>`) | `runCommandDetector.ts` |
+
+### Button Text Patterns
+
+- **Run**: `run`, `実行`, `execute`
+- **Reject**: `reject`, `cancel`, `拒否`, `キャンセル`
+
+### Command Extraction
+
+The `<pre>` element contains: `<working-directory> $ <command>`. Split on ` $ ` to extract:
+- `workingDirectory`: e.g. `~/Code/login`
+- `commandText`: e.g. `python3 -m http.server 8000`
 
 ---
 

@@ -128,6 +128,20 @@ export class CdpService extends EventEmitter {
             );
         }
 
+        // No workbench page found — try to open the chat panel automatically
+        // before falling back to Launchpad
+        if (!target) {
+            const anyPage = allPages.find(t => t.webSocketDebuggerUrl);
+            if (anyPage) {
+                logger.debug('[CdpService] No workbench page found. Attempting to open chat panel via Cmd+L / Ctrl+L...');
+                await this.openChatPanelViaKeyboard(anyPage.webSocketDebuggerUrl);
+
+                // Re-scan after opening chat panel
+                target = await this.findWorkbenchTarget();
+            }
+        }
+
+        // Last resort: accept Launchpad as target
         if (!target) {
             target = allPages.find(t =>
                 t.webSocketDebuggerUrl &&
@@ -237,6 +251,27 @@ export class CdpService extends EventEmitter {
             this.pendingCalls.set(id, { resolve, reject, timeoutId });
             this.ws!.send(JSON.stringify({ id, method, params }));
         });
+    }
+
+    /**
+     * Try call(), and on WebSocket connection error,
+     * attempt a single on-demand reconnect then retry once.
+     * Non-connection errors (timeout, protocol) are NOT retried.
+     */
+    async callWithRetry(method: string, params: any = {}, timeoutMs = 10000): Promise<any> {
+        try {
+            return await this.call(method, params);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const isConnectionError =
+                message === 'WebSocket is not connected' ||
+                message === 'WebSocket disconnected';
+            if (!isConnectionError) {
+                throw error;
+            }
+            await this.reconnectOnDemand(timeoutMs);
+            return await this.call(method, params);
+        }
     }
 
     async disconnect(): Promise<void> {
@@ -633,6 +668,104 @@ export class CdpService extends EventEmitter {
         );
     }
 
+    /**
+     * Scan all CDP ports and return the first workbench-like target page.
+     */
+    private async findWorkbenchTarget(): Promise<any | null> {
+        let allPages: any[] = [];
+        for (const port of this.ports) {
+            try {
+                const list = await this.getJson(`http://127.0.0.1:${port}/json/list`);
+                allPages.push(...list);
+            } catch {
+                // port not responding
+            }
+        }
+
+        return (
+            allPages.find(t =>
+                t.type === 'page' &&
+                t.webSocketDebuggerUrl &&
+                !t.title?.includes('Launchpad') &&
+                !t.url?.includes('workbench-jetski-agent') &&
+                (t.url?.includes('workbench') || t.title?.includes('Antigravity') || t.title?.includes('Cascade')),
+            ) ??
+            allPages.find(t =>
+                t.webSocketDebuggerUrl &&
+                (t.url?.includes('workbench') || t.title?.includes('Antigravity') || t.title?.includes('Cascade')) &&
+                !t.title?.includes('Launchpad'),
+            ) ??
+            null
+        );
+    }
+
+    /**
+     * Temporarily connect to a page and send Cmd+L / Ctrl+L to open the chat panel.
+     */
+    private async openChatPanelViaKeyboard(wsUrl: string): Promise<void> {
+        const tempWs = new WebSocket(wsUrl);
+        let idCounter = 1;
+
+        try {
+            await new Promise<void>((resolve, reject) => {
+                tempWs.on('open', resolve);
+                tempWs.on('error', reject);
+                setTimeout(() => reject(new Error('Timeout')), 5000);
+            });
+
+            const send = (method: string, params: any = {}): Promise<void> =>
+                new Promise((resolve, reject) => {
+                    const id = idCounter++;
+                    tempWs.send(JSON.stringify({ id, method, params }));
+                    const timeout = setTimeout(() => reject(new Error('Timeout')), 3000);
+                    const onMsg = (raw: WebSocket.Data): void => {
+                        try {
+                            const data = JSON.parse(raw.toString());
+                            if (data.id === id) {
+                                clearTimeout(timeout);
+                                tempWs.off('message', onMsg);
+                                resolve();
+                            }
+                        } catch { /* ignore */ }
+                    };
+                    tempWs.on('message', onMsg);
+                });
+
+            const modifiers = process.platform === 'darwin' ? 4 : 2; // Meta : Ctrl
+            await send('Input.dispatchKeyEvent', {
+                type: 'keyDown',
+                key: 'l',
+                code: 'KeyL',
+                modifiers,
+                windowsVirtualKeyCode: 76,
+                nativeVirtualKeyCode: 76,
+            });
+            await send('Input.dispatchKeyEvent', {
+                type: 'keyUp',
+                key: 'l',
+                code: 'KeyL',
+                modifiers,
+                windowsVirtualKeyCode: 76,
+                nativeVirtualKeyCode: 76,
+            });
+
+            // Wait until a workbench target appears, up to a bounded timeout
+            const deadline = Date.now() + 10000;
+            while (Date.now() < deadline) {
+                await new Promise(r => setTimeout(r, 500));
+                if (await this.findWorkbenchTarget()) {
+                    break;
+                }
+            }
+        } catch (e) {
+            logger.debug(`[CdpService] Failed to open chat panel automatically: ${e}`);
+        } finally {
+            if (tempWs.readyState === WebSocket.OPEN) {
+                tempWs.close();
+            }
+        }
+    }
+
     private async runCommand(command: string, args: string[]): Promise<void> {
         await new Promise<void>((resolve, reject) => {
             const child = spawn(command, args, { stdio: 'ignore' });
@@ -728,6 +861,79 @@ export class CdpService extends EventEmitter {
         );
         logger.error('[CdpService]', finalError.message);
         this.emit('reconnectFailed', finalError);
+    }
+
+    /**
+     * Wait for an in-progress reconnection to complete.
+     * Resolves when 'reconnected' fires, rejects on 'reconnectFailed' or timeout.
+     */
+    private waitForReconnection(timeoutMs = 15000): Promise<void> {
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                cleanup();
+                reject(new Error('WebSocket is not connected'));
+            }, timeoutMs);
+
+            const onReconnected = () => {
+                cleanup();
+                resolve();
+            };
+
+            const onFailed = (_err: Error) => {
+                cleanup();
+                reject(new Error('WebSocket is not connected'));
+            };
+
+            const cleanup = () => {
+                clearTimeout(timer);
+                this.removeListener('reconnected', onReconnected);
+                this.removeListener('reconnectFailed', onFailed);
+            };
+
+            this.on('reconnected', onReconnected);
+            this.on('reconnectFailed', onFailed);
+        });
+    }
+
+    /** Shared promise to coalesce concurrent reconnectOnDemand() calls */
+    private reconnectOnDemandPromise: Promise<void> | null = null;
+
+    /**
+     * On-demand reconnect: if already reconnecting, wait; otherwise attempt once.
+     * Throws 'WebSocket is not connected' when no workspace path or reconnect fails.
+     */
+    private async reconnectOnDemand(timeoutMs = 15000): Promise<void> {
+        if (this.isReconnecting) {
+            return this.waitForReconnection(timeoutMs);
+        }
+
+        if (!this.currentWorkspacePath) {
+            throw new Error('WebSocket is not connected');
+        }
+
+        // Coalesce concurrent calls
+        if (!this.reconnectOnDemandPromise) {
+            this.reconnectOnDemandPromise = (async () => {
+                try {
+                    await this.discoverAndConnectForWorkspace(this.currentWorkspacePath!);
+                } catch {
+                    throw new Error('WebSocket is not connected');
+                } finally {
+                    this.reconnectOnDemandPromise = null;
+                }
+            })();
+        }
+
+        let timer: NodeJS.Timeout | undefined;
+        const timeoutPromise = new Promise<void>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('WebSocket is not connected')), timeoutMs);
+        });
+
+        try {
+            await Promise.race([this.reconnectOnDemandPromise, timeoutPromise]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
 
     isConnected(): boolean {
@@ -1284,7 +1490,7 @@ export class CdpService extends EventEmitter {
      */
     async setUiMode(modeName: string): Promise<UiSyncResult> {
         if (!this.isConnectedFlag || !this.ws) {
-            throw new Error('Not connected to CDP. Call connect() first.');
+            await this.reconnectOnDemand();
         }
 
         const safeMode = JSON.stringify(modeName);
@@ -1457,7 +1663,7 @@ export class CdpService extends EventEmitter {
      */
     async setUiModel(modelName: string): Promise<UiSyncResult> {
         if (!this.isConnectedFlag || !this.ws) {
-            throw new Error('Not connected to CDP. Call connect() first.');
+            await this.reconnectOnDemand();
         }
 
         // DOM manipulation script: based on actual Antigravity UI DOM structure
