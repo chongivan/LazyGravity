@@ -142,13 +142,22 @@ export class JoinCommandHandler {
         // Step 1: Check if a channel already exists for this session
         const existingSession = this.chatSessionRepo.findByDisplayName(projectName, selectedTitle);
         if (existingSession) {
-            const embed = new EmbedBuilder()
-                .setTitle(t('🔗 Session Already Connected'))
-                .setDescription(t(`This session already has a channel:\n→ <#${existingSession.channelId}>`))
-                .setColor(0x3498DB)
-                .setTimestamp();
-            await interaction.editReply({ embeds: [embed], components: [] });
-            return;
+            const channel = await guild.channels.fetch(existingSession.channelId).catch(() => null);
+
+            if (channel) {
+                const embed = new EmbedBuilder()
+                    .setTitle(t('🔗 Session Already Connected'))
+                    .setDescription(t(`This session already has a channel:\n→ <#${existingSession.channelId}>`))
+                    .setColor(0x3498DB)
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [embed], components: [] });
+                return;
+            } else {
+                // Clean up stale bindings since the channel is gone
+                logger.info(`[Cleanup] Removed stale session binding for deleted channel ${existingSession.channelId}`);
+                this.chatSessionRepo.deleteByChannelId(existingSession.channelId);
+                this.bindingRepo.deleteByChannelId(existingSession.channelId);
+            }
         }
 
         // Step 2: Connect to CDP

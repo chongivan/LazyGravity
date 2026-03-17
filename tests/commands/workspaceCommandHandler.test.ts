@@ -11,6 +11,7 @@ import {
     WORKSPACE_SELECT_ID,
 } from '../../src/commands/workspaceCommandHandler';
 import { ITEMS_PER_PAGE, PROJECT_SELECT_ID } from '../../src/ui/projectListUi';
+import { DiscordAPIError } from 'discord.js';
 
 describe('WorkspaceCommandHandler', () => {
     let db: Database.Database;
@@ -122,6 +123,65 @@ describe('WorkspaceCommandHandler', () => {
 
             const call = interaction.update.mock.calls[0][0];
             expect(call.content).toContain('not found');
+        });
+
+        it('cleans up stale binding when the Discord channel no longer exists', async () => {
+            fs.mkdirSync(path.join(tmpDir, 'stale-project'));
+
+            // Insert a stale binding manually
+            bindingRepo.create({
+                channelId: 'deleted-ch-1',
+                workspacePath: 'stale-project',
+                guildId: 'guild-1',
+            });
+            chatSessionRepo.create({
+                channelId: 'deleted-ch-1',
+                categoryId: 'old-cat',
+                workspacePath: 'stale-project',
+                sessionNumber: 1,
+                guildId: 'guild-1',
+            });
+
+            // Mock guild where fetch rejects for the old channel
+            const mockGuild = {
+                id: 'guild-1',
+                channels: {
+                    cache: {
+                        find: jest.fn().mockReturnValue(undefined),
+                    },
+                    fetch: jest.fn().mockImplementation((id) => {
+                        if (id === 'deleted-ch-1') {
+                            const err = new Error('Unknown Channel') as any;
+                            err.code = 10003;
+                            // Add DiscordAPIError prototype dynamically for instanceof check
+                            Object.setPrototypeOf(err, DiscordAPIError.prototype);
+                            return Promise.reject(err);
+                        }
+                        return Promise.resolve({
+                            find: jest.fn().mockReturnValue(undefined),
+                        });
+                    }),
+                    create: jest.fn()
+                        .mockResolvedValueOnce({ id: 'cat-new', name: '🗂️-stale-project' })
+                        .mockResolvedValueOnce({ id: 'new-ch-var', name: 'session-2' }),
+                },
+            };
+
+            const interaction = {
+                values: ['stale-project'],
+                channelId: 'ch-1',
+                guildId: 'guild-1',
+                update: jest.fn().mockResolvedValue(undefined),
+            };
+
+            await handler.handleSelectMenu(interaction as any, mockGuild as any);
+
+            // Stale binding should be removed
+            expect(bindingRepo.findByChannelId('deleted-ch-1')).toBeUndefined();
+
+            // New binding should be created
+            expect(bindingRepo.findByChannelId('new-ch-var')?.workspacePath).toBe('stale-project');
+            expect(interaction.update).toHaveBeenCalledTimes(1);
         });
     });
 

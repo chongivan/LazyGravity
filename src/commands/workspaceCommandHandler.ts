@@ -1,13 +1,15 @@
 import { t } from "../utils/i18n";
 import fs from 'fs';
+import { logger } from '../utils/logger';
 import {
     ButtonInteraction,
     ChatInputCommandInteraction,
     StringSelectMenuInteraction,
     EmbedBuilder,
     Guild,
+    DiscordAPIError,
 } from 'discord.js';
-import { WorkspaceBindingRepository } from '../database/workspaceBindingRepository';
+import { WorkspaceBindingRepository, WorkspaceBindingRecord } from '../database/workspaceBindingRepository';
 import { ChatSessionRepository } from '../database/chatSessionRepository';
 import { WorkspaceService } from '../services/workspaceService';
 import { ChannelManager } from '../services/channelManager';
@@ -27,6 +29,40 @@ export class WorkspaceCommandHandler {
     private readonly channelManager: ChannelManager;
 
     private processingWorkspaces: Set<string> = new Set();
+
+    /**
+     * Filters out stale bindings where the Discord channel no longer exists.
+     * Deletes stale bindings from the repository.
+     */
+    private async getValidBindings(bindings: WorkspaceBindingRecord[], guild: Guild): Promise<WorkspaceBindingRecord[]> {
+        const validBindings: WorkspaceBindingRecord[] = [];
+        for (const b of bindings) {
+            try {
+                // Try fetching the channel from Discord API
+                try {
+                    const channel = await guild.channels.fetch(b.channelId);
+                    if (channel) validBindings.push(b);
+                } catch (error) {
+                    // Only cleanup for confirmed deleted channels (code 10003)
+                    if (error instanceof DiscordAPIError && error.code === 10003) {
+                        logger.info(`[Cleanup] Removed stale binding for deleted channel ${b.channelId}`);
+                        this.chatSessionRepo.deleteByChannelId(b.channelId);
+                        this.bindingRepo.deleteByChannelId(b.channelId);
+                        continue;
+                    }
+
+                    // Transient failures: preserve binding for next validation attempt
+                    logger.error(`[Cleanup] Failed to validate binding for channel ${b.channelId}`, error);
+                    validBindings.push(b);
+                }
+            } catch (error) {
+                logger.error(`[Cleanup] Failed to remove stale binding for channel ${b.channelId}`, error);
+                this.chatSessionRepo.deleteByChannelId(b.channelId);
+                this.bindingRepo.deleteByChannelId(b.channelId);
+            }
+        }
+        return validBindings;
+    }
 
     constructor(
         bindingRepo: WorkspaceBindingRepository,
@@ -83,7 +119,9 @@ export class WorkspaceCommandHandler {
         }
 
         // Check if the same project is already bound (prevent duplicates)
-        const existingBindings = this.bindingRepo.findByWorkspacePathAndGuildId(workspacePath, guild.id);
+        let existingBindings = this.bindingRepo.findByWorkspacePathAndGuildId(workspacePath, guild.id);
+        existingBindings = await this.getValidBindings(existingBindings, guild);
+
         if (existingBindings.length > 0) {
             const channelLinks = existingBindings.map(b => `<#${b.channelId}>`).join(', ');
             const fullPath = this.workspaceService.getWorkspacePath(workspacePath);
@@ -190,7 +228,9 @@ export class WorkspaceCommandHandler {
 
         // Check for existing project
         if (this.workspaceService.exists(name)) {
-            const existingBindings = this.bindingRepo.findByWorkspacePathAndGuildId(name, guild.id);
+            let existingBindings = this.bindingRepo.findByWorkspacePathAndGuildId(name, guild.id);
+            existingBindings = await this.getValidBindings(existingBindings, guild);
+
             if (existingBindings.length > 0) {
                 const channelLinks = existingBindings.map(b => `<#${b.channelId}>`).join(', ');
                 await interaction.editReply({
