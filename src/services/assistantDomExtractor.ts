@@ -9,6 +9,7 @@
  */
 
 import { htmlToDiscordMarkdown } from '../utils/htmlToDiscordMarkdown';
+import { htmlToTelegramHtml } from '../utils/htmlToTelegramHtml';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +28,8 @@ export interface AssistantDomSegmentPayload {
     extractedAt: number;
     segments: AssistantDomSegment[];
 }
+
+export type OutputFormat = 'discord-markdown' | 'telegram-html';
 
 export interface ClassifyResult {
     finalOutputText: string;
@@ -49,7 +52,10 @@ export interface ClassifyResult {
  *
  * If the payload is invalid, returns a legacy-fallback result with empty fields.
  */
-export function classifyAssistantSegments(payload: unknown): ClassifyResult {
+export function classifyAssistantSegments(
+    payload: unknown,
+    outputFormat: OutputFormat = 'discord-markdown',
+): ClassifyResult {
     if (!isValidPayload(payload)) {
         return {
             finalOutputText: '',
@@ -95,9 +101,11 @@ export function classifyAssistantSegments(payload: unknown): ClassifyResult {
         }
     }
 
-    // Join body segments and apply HTML-to-Markdown conversion
+    // Join body segments and convert based on target platform
     const rawBody = bodyTexts.join('\n\n');
-    const finalOutputText = htmlToDiscordMarkdown(rawBody);
+    const finalOutputText = outputFormat === 'telegram-html'
+        ? htmlToTelegramHtml(rawBody)
+        : htmlToDiscordMarkdown(rawBody);
 
     return {
         finalOutputText,
